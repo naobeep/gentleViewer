@@ -1,33 +1,27 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { registerThumbnailIpc } from './ipc/thumbnail-ipc';
 
 let mainWindow: BrowserWindow | null = null;
 
-const isDev = process.env.NODE_ENV !== 'production' || process.env.ELECTRON_START_URL;
+const isDev = process.env.NODE_ENV !== 'production' || !!process.env.ELECTRON_START_URL;
 
 function resolvePreload(): string | undefined {
-  // 探索候補（ビルド済み(dist)を優先）
   const candidates = [
-    // compiled: dist/preload/thumbnail.js （実行時 __dirname が dist/main 等の場合に有効）
-    path.join(__dirname, '../preload/thumbnail.js'),
-    // プロジェクトルートの dist（実行コンテキストによっては有効）
+    path.join(__dirname, '../preload/thumbnail.js'), // dist/preload when built
     path.join(process.cwd(), 'dist', 'preload', 'thumbnail.js'),
-    // 互換: src/preload (ts を直接置いたり dev 用に存在する場合)
-    path.join(process.cwd(), 'src', 'preload', 'thumbnail.js'),
-    // 旧候補（残しておく）
+    path.join(process.cwd(), 'src', 'preload', 'thumbnail.js'), // ts -> js in dev sometimes
     path.join(__dirname, '../../src/preload/thumbnail.js'),
-    path.join(__dirname, 'preload/thumbnail.js'),
   ];
-
   for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      console.info('preload found:', p);
-      return p;
-    }
+    try {
+      if (fs.existsSync(p)) {
+        console.info('preload found:', p);
+        return p;
+      }
+    } catch {}
   }
-
   console.warn('preload not found in candidates:', candidates);
   return undefined;
 }
@@ -35,16 +29,31 @@ function resolvePreload(): string | undefined {
 async function createWindow() {
   const preloadPath = resolvePreload();
 
+  // CSP を global session に追加（dev では localhost を許可）
+  try {
+    const allowHosts = isDev
+      ? ["'self'", 'http://localhost:5173', 'ws://localhost:5173']
+      : ["'self'"];
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      const csp = `default-src ${allowHosts.join(' ')} data: blob:; script-src ${allowHosts.join(' ')} 'unsafe-inline' 'unsafe-eval'; style-src ${allowHosts.join(' ')} 'unsafe-inline'; img-src * data: blob:;`;
+      const headers = Object.assign({}, details.responseHeaders, {
+        'Content-Security-Policy': [csp],
+      });
+      callback({ responseHeaders: headers });
+    });
+  } catch (e) {
+    console.warn('failed to install CSP header handler:', e);
+  }
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: {
-      // preloadPath があれば使用、なければ undefined（その場合は dev-stub を注入）
       preload: preloadPath ?? undefined,
       contextIsolation: true,
       nodeIntegration: false,
+      // sandbox: true, // 有効化する場合は preload の実行方式とビルドを確認してください
     },
-    // アイコン指定: 開発時とビルド後のパスを考慮
     icon: (() => {
       if (isDev) return path.join(__dirname, '../../src/icon/64.png');
       return path.join(__dirname, '../renderer/64.png');
@@ -54,50 +63,7 @@ async function createWindow() {
   if (isDev) {
     const devUrl = process.env.ELECTRON_START_URL || 'http://localhost:5173';
     await mainWindow.loadURL(devUrl);
-
-    // DevTools を自動で開かない。必要なときだけ SHOW_DEVTOOLS=1 を指定して開く
-    if (process.env.SHOW_DEVTOOLS === '1') {
-      mainWindow.webContents.openDevTools();
-    }
-
-    // preload が無い場合にのみ dev-stub を注入（preload があるなら本物が機能します）
-    if (!preloadPath) {
-      const devApi = `
-        window.electronAPI = {
-          onThumbnailProgress: (cb) => { return () => {}; },
-          onThumbnailError: (cb) => { return () => {}; },
-          startThumbnailGeneration: (files) => Promise.resolve({ started: true }),
-          pauseThumbnailGeneration: () => Promise.resolve(),
-          resumeThumbnailGeneration: () => Promise.resolve(),
-          cancelThumbnailGeneration: () => Promise.resolve(),
-          getSavedSearches: () => Promise.resolve([]),
-          saveSavedSearch: (s) => Promise.resolve(),
-          executeSearch: (q) => Promise.resolve(),
-          updateSearchExecutionCount: (id) => Promise.resolve()
-        };
-        true;
-      `;
-      try {
-        await mainWindow.webContents.executeJavaScript(devApi, true);
-        console.info('Dev electronAPI stub injected');
-      } catch (e) {
-        console.warn('failed to inject dev electronAPI stub:', e);
-      }
-    }
-
-    // console-message ハンドラ（既存）
-    mainWindow.webContents.on('console-message', (...args: any[]) => {
-      try {
-        let msg = '';
-        if (args.length === 1 && args[0] && typeof args[0] === 'object') {
-          msg = String((args[0] as any).message ?? '');
-        } else {
-          const possibleMessage = args.find(a => typeof a === 'string');
-          msg = String(possibleMessage ?? '');
-        }
-        if (msg.includes('Autofill.')) return;
-      } catch {}
-    });
+    if (process.env.SHOW_DEVTOOLS === '1') mainWindow.webContents.openDevTools();
   } else {
     const indexHtml = path.join(__dirname, '../renderer/index.html');
     await mainWindow.loadFile(indexHtml);
@@ -110,12 +76,11 @@ async function createWindow() {
 
 app.on('ready', async () => {
   try {
-    // IPC 登録（存在すれば）
     try {
       registerThumbnailIpc();
+      console.info('registerThumbnailIpc: OK');
     } catch (e) {
-      // module 未作成等はログ出力のみ
-      console.warn('registerThumbnailIpc failed:', (e as Error).message);
+      console.error('registerThumbnailIpc failed (caught):', e);
     }
 
     await createWindow();
@@ -138,6 +103,6 @@ app.on('activate', async () => {
 });
 
 // 安全のための uncaught ハンドリング
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', err => {
   console.error('Uncaught exception:', err);
 });

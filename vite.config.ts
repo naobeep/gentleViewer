@@ -1,31 +1,41 @@
 import { defineConfig } from 'vite';
-// @ts-ignore: TypeScript moduleResolution currently can't resolve @vitejs/plugin-react's types in this project setup
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
-  root: path.join(__dirname, 'src/renderer'),
-  base: './',
-  // publicDir をプロジェクトの src/icon フォルダに変更（/64.png として配信される）
-  publicDir: path.join(__dirname, 'src', 'icon'),
+  // renderer ソースをルートに設定
+  root: path.resolve(__dirname, 'src', 'renderer'),
+  // src/icon を publicDir にして /64.png を配信
+  publicDir: path.resolve(__dirname, 'src', 'icon'),
+  server: {
+    host: 'localhost',
+    port: 5173,
+    strictPort: true,
+    // HMR が Electron と共存しやすいように設定
+    watch: {
+      // ネイティブの file watcher を優先して問題を減らす
+      usePolling: false,
+    },
+  },
   build: {
-    outDir: path.join(__dirname, 'dist/renderer'),
+    outDir: path.resolve(__dirname, 'dist', 'renderer'),
     emptyOutDir: true,
+    sourcemap: true,
     rollupOptions: {
-      input: {
-        main: path.join(__dirname, 'src/renderer/index.html'),
-      },
+      input: path.resolve(__dirname, 'src', 'renderer', 'index.html'),
     },
   },
   resolve: {
     alias: {
-      '@shared': path.join(__dirname, 'src/shared'),
-      '@renderer': path.join(__dirname, 'src/renderer'),
+      // renderer 内での絶対 import 用
+      '@': path.resolve(__dirname, 'src', 'renderer'),
+      // main/preload/shared 用のショートカット
+      '@shared': path.resolve(__dirname, 'src', 'shared'),
     },
   },
-  server: {
-    port: 5173,
-    strictPort: true,
+  optimizeDeps: {
+    // electron はバンドルしない
+    exclude: ['electron'],
   },
 });
