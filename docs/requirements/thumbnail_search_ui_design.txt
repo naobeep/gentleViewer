@@ -1,0 +1,937 @@
+# サムネイル生成進捗・保存済み検索管理UI 設計書
+
+## 目次
+
+1. [サムネイル生成進捗UI](#1-サムネイル生成進捗ui)
+2. [保存済み検索管理UI](#2-保存済み検索管理ui)
+
+---
+
+## 1. サムネイル生成進捗UI
+
+### 1.1 概要
+
+バックグラウンドで実行されるサムネイル生成の進捗を視覚的に表示し、ユーザーに現在の処理状況を伝える。
+
+### 1.2 表示位置
+
+**ステータスバー右側（常駐型）**
+
+```txt
+┌──────────────────────────────────────────────────────────┐
+│ 1,234件中 45件選択  合計: 2.3GB  [サムネイル生成中 15/120] │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 1.3 状態別表示
+
+#### 1.3.1 生成中
+
+```txt
+[🔄 サムネイル生成中 15/120]
+```
+
+- クリックで詳細パネルを開く
+- プログレスバーをツールチップ表示
+
+#### 1.3.2 完了
+
+```txt
+[✓ サムネイル生成完了]
+```
+
+- 3秒後に自動で消える
+- クリックで即座に非表示
+
+#### 1.3.3 エラー
+
+```txt
+[⚠ サムネイル生成エラー]
+```
+
+- クリックでエラー詳細を表示
+
+### 1.4 詳細パネル
+
+```txt
+┌─────────────────────────────────────────────────┐
+│ サムネイル生成                                   │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│ 進捗: 15 / 120 ファイル (12.5%)                 │
+│ [▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 12%  │
+│                                                 │
+│ 処理中: manga_vol_15.zip                        │
+│ 残り時間: 約 2分30秒                            │
+│                                                 │
+│ 成功: 14                                        │
+│ スキップ: 1 (キャッシュ済み)                     │
+│ エラー: 0                                        │
+│                                                 │
+│ [一時停止] [キャンセル] [バックグラウンド実行]  │
+└─────────────────────────────────────────────────┘
+```
+
+### 1.5 実装
+
+#### 1.5.1 型定義
+
+```typescript
+interface ThumbnailGenerationProgress {
+  total: number;
+  completed: number;
+  skipped: number;
+  errors: number;
+  currentFile: string | null;
+  estimatedTimeRemaining: number | null; // 秒
+  status: 'idle' | 'running' | 'paused' | 'completed' | 'error';
+}
+
+interface ThumbnailError {
+  filePath: string;
+  fileName: string;
+  error: string;
+  timestamp: number;
+}
+```
+
+#### 1.5.2 コンポーネント
+
+```typescript
+const ThumbnailProgressIndicator: React.FC = () => {
+  const [progress, setProgress] = useState<ThumbnailGenerationProgress | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
+  const [errors, setErrors] = useState<ThumbnailError[]>([]);
+
+  // プログレス更新を購読
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onThumbnailProgress((data) => {
+      setProgress(data);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  // エラー通知を購読
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onThumbnailError((error) => {
+      setErrors(prev => [...prev, error]);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  if (!progress || progress.status === 'idle') return null;
+
+  const percentage = (progress.completed / progress.total) * 100;
+
+  return (
+    <>
+      <div
+        className="thumbnail-progress-indicator"
+        onClick={() => setShowDetail(true)}
+      >
+        {progress.status === 'running' && (
+          <>
+            <SpinnerIcon className="rotating" size={16} />
+            <span>サムネイル生成中 {progress.completed}/{progress.total}</span>
+          </>
+        )}
+        {progress.status === 'completed' && (
+          <>
+            <CheckIcon size={16} />
+            <span>サムネイル生成完了</span>
+          </>
+        )}
+        {progress.status === 'error' && (
+          <>
+            <AlertIcon size={16} />
+            <span>サムネイル生成エラー</span>
+          </>
+        )}
+      </div>
+
+      {showDetail && (
+        <ThumbnailProgressDetail
+          progress={progress}
+          errors={errors}
+          onClose={() => setShowDetail(false)}
+        />
+      )}
+    </>
+  );
+};
+
+const ThumbnailProgressDetail: React.FC<{
+  progress: ThumbnailGenerationProgress;
+  errors: ThumbnailError[];
+  onClose: () => void;
+}> = ({ progress, errors, onClose }) => {
+  const percentage = (progress.completed / progress.total) * 100;
+
+  const handlePause = async () => {
+    await window.electronAPI.pauseThumbnailGeneration();
+  };
+
+  const handleResume = async () => {
+    await window.electronAPI.resumeThumbnailGeneration();
+  };
+
+  const handleCancel = async () => {
+    await window.electronAPI.cancelThumbnailGeneration();
+    onClose();
+  };
+
+  return (
+    <div className="thumbnail-progress-detail">
+      <div className="detail-header">
+        <h3>サムネイル生成</h3>
+        <button onClick={onClose}>×</button>
+      </div>
+
+      <div className="detail-content">
+        <div className="progress-info">
+          <p>進捗: {progress.completed} / {progress.total} ファイル ({percentage.toFixed(1)}%)</p>
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{ width: `${percentage}%` }}
+            />
+          </div>
+        </div>
+
+        {progress.currentFile && (
+          <div className="current-file">
+            <p className="label">処理中:</p>
+            <p className="value">{progress.currentFile}</p>
+          </div>
+        )}
+
+        {progress.estimatedTimeRemaining && (
+          <div className="time-remaining">
+            <p>残り時間: 約 {formatDuration(progress.estimatedTimeRemaining)}</p>
+          </div>
+        )}
+
+        <div className="stats-grid">
+          <div className="stat-item">
+            <span className="label">成功</span>
+            <span className="value success">{progress.completed - progress.errors}</span>
+          </div>
+          <div className="stat-item">
+            <span className="label">スキップ</span>
+            <span className="value">{progress.skipped}</span>
+          </div>
+          <div className="stat-item">
+            <span className="label">エラー</span>
+            <span className="value error">{progress.errors}</span>
+          </div>
+        </div>
+
+        {errors.length > 0 && (
+          <div className="error-list">
+            <h4>エラー ({errors.length}件)</h4>
+            <div className="error-items">
+              {errors.slice(0, 5).map((error, index) => (
+                <div key={index} className="error-item">
+                  <AlertIcon size={16} />
+                  <span>{error.fileName}</span>
+                  <span className="error-message">{error.error}</span>
+                </div>
+              ))}
+              {errors.length > 5 && (
+                <p className="more-errors">他 {errors.length - 5} 件のエラー</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="detail-footer">
+        {progress.status === 'running' ? (
+          <button onClick={handlePause}>一時停止</button>
+        ) : progress.status === 'paused' ? (
+          <button onClick={handleResume}>再開</button>
+        ) : null}
+        <button onClick={handleCancel}>キャンセル</button>
+        <button className="primary" onClick={onClose}>
+          バックグラウンド実行
+        </button>
+      </div>
+    </div>
+  );
+};
+```
+
+#### 1.5.3 メインプロセス実装
+
+```typescript
+// main/services/thumbnail-generator.ts
+import { EventEmitter } from 'events';
+import path from 'path';
+import fs from 'fs/promises';
+import pLimit from 'p-limit';
+import { ThumbnailGenerationProgress, ThumbnailError } from '../../src/shared/types/thumbnail';
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+class ThumbnailGenerator extends EventEmitter {
+  private queue: string[] = [];
+  private isRunning = false;
+  private isPaused = false;
+  private limit = pLimit(3); // 同時3ファイル
+
+  private progress: ThumbnailGenerationProgress = {
+    total: 0,
+    completed: 0,
+    skipped: 0,
+    errors: 0,
+    currentFile: null,
+    estimatedTimeRemaining: null,
+    status: 'idle',
+  };
+
+  async generateThumbnails(filePaths: string[]) {
+    if (!filePaths || filePaths.length === 0) return;
+    this.queue = [...filePaths];
+    this.progress.total = filePaths.length;
+    this.progress.completed = 0;
+    this.progress.skipped = 0;
+    this.progress.errors = 0;
+    this.progress.status = 'running';
+    this.isRunning = true;
+
+    const startTime = Date.now();
+
+    try {
+      const tasks = this.queue.map((filePath) =>
+        this.limit(async () => {
+          if (!this.isRunning) return;
+
+          while (this.isPaused) {
+            await sleep(100);
+          }
+
+          this.progress.currentFile = path.basename(filePath);
+          this.emitProgress();
+
+          try {
+            const exists = await this.checkCachedThumbnail(filePath);
+            if (exists) {
+              this.progress.skipped++;
+            } else {
+              await this.generateSingleThumbnail(filePath);
+            }
+            this.progress.completed++;
+          } catch (err) {
+            this.progress.errors++;
+            const errorObj: ThumbnailError = {
+              filePath,
+              fileName: path.basename(filePath),
+              error: err instanceof Error ? err.message : String(err),
+              timestamp: Date.now(),
+            };
+            this.emit('error', errorObj);
+          }
+
+          const elapsed = Date.now() - startTime;
+          const rate = elapsed > 0 ? this.progress.completed / elapsed : 0;
+          const remaining = this.progress.total - this.progress.completed;
+          this.progress.estimatedTimeRemaining = rate > 0 ? Math.ceil((remaining / rate) / 1000) : null;
+
+          this.emitProgress();
+        })
+      );
+
+      await Promise.all(tasks);
+
+      if (this.isRunning) {
+        this.progress.status = 'completed';
+        this.progress.currentFile = null;
+        this.emitProgress();
+
+        // 自動的に idle に戻したい場合はここでリセットしても良い
+        this.isRunning = false;
+      }
+    } catch (error) {
+      this.progress.status = 'error';
+      this.emitProgress();
+      this.isRunning = false;
+    }
+  }
+
+  pause() {
+    this.isPaused = true;
+    this.progress.status = 'paused';
+    this.emitProgress();
+  }
+
+  resume() {
+    this.isPaused = false;
+    this.progress.status = 'running';
+    this.emitProgress();
+  }
+
+  cancel() {
+    this.isRunning = false;
+    this.queue = [];
+    this.progress.status = 'idle';
+    this.progress.currentFile = null;
+    this.emitProgress();
+  }
+
+  private emitProgress() {
+    // progress オブジェクトはコピーして送る
+    this.emit('progress', { ...this.progress });
+  }
+
+  private async generateSingleThumbnail(filePath: string): Promise<void> {
+    // 実運用ではここを sharp 等で実装する
+    // ここではプレースホルダとして短時間待機してダミーthumbを作成する
+    const thumbsDir = path.join(path.dirname(filePath), '.gentle_thumbs');
+    try {
+      await fs.mkdir(thumbsDir, { recursive: true });
+      await sleep(300 + Math.random() * 700); // 擬似処理時間
+      const thumbPath = path.join(thumbsDir, path.basename(filePath) + '.thumb');
+      await fs.writeFile(thumbPath, 'thumbnail'); // 実運用では画像データ
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  private async checkCachedThumbnail(filePath: string): Promise<boolean> {
+    const thumbsDir = path.join(path.dirname(filePath), '.gentle_thumbs');
+    const thumbPath = path.join(thumbsDir, path.basename(filePath) + '.thumb');
+    try {
+      await fs.access(thumbPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+export const thumbnailGenerator = new ThumbnailGenerator();
+```
+
+---
+
+## 2. 保存済み検索管理UI
+
+### 2.1 概要
+
+よく使う検索条件を保存・管理し、ワンクリックで再検索できる機能。
+
+### 2.2 表示位置
+
+サイドバーの「クイックアクセス」セクション内
+
+```txt
+┌───────────────────────────┐
+│ [クイックアクセス]         │
+│  📁 最近追加               │
+│  ⭐ お気に入り             │
+│  🔖 保存済み検索           │ ← ここ
+│  📊 統計                   │
+└───────────────────────────┘
+```
+
+### 2.3 保存済み検索パネル
+
+```txt
+┌─────────────────────────────────────────┐
+│ 保存済み検索                             │
+├─────────────────────────────────────────┤
+│ [+ 新規保存]                [⚙管理]     │
+├─────────────────────────────────────────┤
+│                                         │
+│ ⭐ 未読漫画                              │
+│    タグ: 漫画 AND 未読                   │
+│    15件                                 │
+│                                         │
+│ 📺 長編動画                              │
+│    タグ: 動画, 長さ: 30分以上            │
+│    8件                                  │
+│                                         │
+│ 📚 技術書PDF                             │
+│    タグ: PDF AND 技術書                  │
+│    42件                                 │
+│                                         │
+│ 🎨 イラスト集（高解像度）                 │
+│    タグ: イラスト, 解像度: 1920x1080以上  │
+│    127件                                │
+│                                         │
+└─────────────────────────────────────────┘
+```
+
+### 2.4 保存ダイアログ
+
+```txt
+┌─────────────────────────────────────────┐
+│ 検索条件を保存                           │
+├─────────────────────────────────────────┤
+│                                         │
+│ 検索名: [___________________________]   │
+│                                         │
+│ 現在の検索条件:                          │
+│ ┌─────────────────────────────────────┐ │
+│ │ タグ: 漫画, 完結                     │ │
+│ │ ファイル形式: アーカイブ             │ │
+│ │ ページ数: 20〜100                    │ │
+│ │ 更新日: 過去7日間                    │ │
+│ └─────────────────────────────────────┘ │
+│                                         │
+│ ☑ お気に入りに追加                       │
+│ ☐ サイドバーに固定表示                   │
+│                                         │
+│ アイコン: [📚▾]                         │
+│                                         │
+│ [キャンセル]              [保存]        │
+└─────────────────────────────────────────┘
+```
+
+### 2.5 管理画面
+
+```txt
+┌─────────────────────────────────────────────────────────┐
+│ 保存済み検索の管理                                       │
+├─────────────────────────────────────────────────────────┤
+│ [検索: ____________] [並び順: 名前順▾] [+ 新規作成]     │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│ ☑ ⭐ 未読漫画                                     [編集] │
+│    タグ: 漫画 AND 未読                                   │
+│    作成: 2025-09-15  最終実行: 2025-10-05              │
+│    実行回数: 42回                                       │
+│                                                         │
+│ ☑ 📺 長編動画                                     [編集] │
+│    タグ: 動画, 長さ: 30分以上                            │
+│    作成: 2025-09-20  最終実行: 2025-10-03              │
+│    実行回数: 18回                                       │
+│                                                         │
+│ ☐ 📚 技術書PDF                                    [編集] │
+│    タグ: PDF AND 技術書                                  │
+│    作成: 2025-08-10  最終実行: 2025-09-28              │
+│    実行回数: 5回                                        │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│ 選択: 2件                                               │
+│ [削除] [エクスポート] [インポート]           [閉じる]   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2.6 実装
+
+#### 2.6.1 型定義
+
+```typescript
+interface SavedSearch {
+  id: string;
+  name: string;
+  icon: string;
+  query: SearchQuery;
+  isFavorite: boolean;
+  isPinned: boolean;
+  createdAt: Date;
+  lastExecuted: Date | null;
+  executionCount: number;
+}
+
+interface SearchQuery {
+  tags: {
+    include: number[];
+    exclude: number[];
+    any: number[];
+  };
+  fileTypes: string[];
+  filename?: string;
+  dateRange?: [Date, Date];
+  sizeRange?: [number, number];
+  // 形式固有フィルター
+  archivePageRange?: [number, number];
+  durationRange?: [number, number];
+  resolutionMin?: { width: number; height: number };
+}
+```
+
+#### 2.6.2 保存済み検索コンポーネント
+
+```typescript
+const SavedSearchesPanel: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+}> = ({ isOpen, onClose }) => {
+  const [searches, setSearches] = useState<SavedSearch[]>([]);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [showManageDialog, setShowManageDialog] = useState(false);
+
+  useEffect(() => {
+    const loadSearches = async () => {
+      const data = await window.electronAPI.getSavedSearches();
+      setSearches(data);
+    };
+    loadSearches();
+  }, []);
+
+  const handleExecute = async (search: SavedSearch) => {
+    await window.electronAPI.executeSearch(search.query);
+    await window.electronAPI.updateSearchExecutionCount(search.id);
+
+    // 実行回数更新
+    setSearches(prev =>
+      prev.map(s =>
+        s.id === search.id
+          ? { ...s, executionCount: s.executionCount + 1, lastExecuted: new Date() }
+          : s
+      )
+    );
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="saved-searches-panel">
+      <div className="panel-header">
+        <h3>保存済み検索</h3>
+        <div className="header-actions">
+          <button onClick={() => setShowSaveDialog(true)}>
+            + 新規保存
+          </button>
+          <button onClick={() => setShowManageDialog(true)}>
+            ⚙ 管理
+          </button>
+          <button onClick={onClose}>×</button>
+        </div>
+      </div>
+
+      <div className="panel-content">
+        {searches.length > 0 ? (
+          <div className="search-list">
+            {searches
+              .filter(s => s.isPinned)
+              .map(search => (
+                <SavedSearchItem
+                  key={search.id}
+                  search={search}
+                  onExecute={handleExecute}
+                />
+              ))}
+          </div>
+        ) : (
+          <div className="no-searches">
+            <p>保存済み検索がありません</p>
+            <button onClick={() => setShowSaveDialog(true)}>
+              検索条件を保存
+            </button>
+          </div>
+        )}
+      </div>
+
+      {showSaveDialog && (
+        <SaveSearchDialog
+          onClose={() => setShowSaveDialog(false)}
+          onSave={(search) => {
+            setSearches(prev => [...prev, search]);
+            setShowSaveDialog(false);
+          }}
+        />
+      )}
+
+      {showManageDialog && (
+        <ManageSavedSearchesDialog
+          searches={searches}
+          onUpdate={setSearches}
+          onClose={() => setShowManageDialog(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+const SavedSearchItem: React.FC<{
+  search: SavedSearch;
+  onExecute: (search: SavedSearch) => void;
+}> = ({ search, onExecute }) => {
+  const queryDescription = formatSearchQuery(search.query);
+
+  return (
+    <div
+      className="saved-search-item"
+      onClick={() => onExecute(search)}
+    >
+      <div className="search-icon">{search.icon}</div>
+      <div className="search-info">
+        <div className="search-name">
+          {search.isFavorite && <StarIcon size={14} />}
+          {search.name}
+        </div>
+        <div className="search-query">{queryDescription}</div>
+        <div className="search-meta">
+          実行回数: {search.executionCount}回
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const SaveSearchDialog: React.FC<{
+  onClose: () => void;
+  onSave: (search: SavedSearch) => void;
+}> = ({ onClose, onSave }) => {
+  const [name, setName] = useState('');
+  const [icon, setIcon] = useState('📚');
+  const [isFavorite, setIsFavorite] = useState(false);
+  const [isPinned, setIsPinned] = useState(true);
+
+  const currentQuery = useCurrentSearchQuery();
+
+  const handleSave = async () => {
+    const search: SavedSearch = {
+      id: generateId(),
+      name,
+      icon,
+      query: currentQuery,
+      isFavorite,
+      isPinned,
+      createdAt: new Date(),
+      lastExecuted: null,
+      executionCount: 0,
+    };
+
+    await window.electronAPI.saveSavedSearch(search);
+    onSave(search);
+  };
+
+  return (
+    <div className="dialog-overlay" onClick={onClose}>
+      <div className="dialog save-search-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <h3>検索条件を保存</h3>
+          <button onClick={onClose}>×</button>
+        </div>
+
+        <div className="dialog-content">
+          <div className="form-group">
+            <label>検索名</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="例: 未読漫画"
+              autoFocus
+            />
+          </div>
+
+          <div className="current-query">
+            <h4>現在の検索条件:</h4>
+            <div className="query-preview">
+              {formatSearchQuery(currentQuery)}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>
+              <input
+                type="checkbox"
+                checked={isFavorite}
+                onChange={(e) => setIsFavorite(e.target.checked)}
+              />
+              お気に入りに追加
+            </label>
+          </div>
+
+          <div className="form-group">
+            <label>
+              <input
+                type="checkbox"
+                checked={isPinned}
+                onChange={(e) => setIsPinned(e.target.checked)}
+              />
+              サイドバーに固定表示
+            </label>
+          </div>
+
+          <div className="form-group">
+            <label>アイコン</label>
+            <select value={icon} onChange={(e) => setIcon(e.target.value)}>
+              <option value="📚">📚 書籍</option>
+              <option value="🎬">🎬 動画</option>
+              <option value="🎨">🎨 イラスト</option>
+              <option value="📷">📷 写真</option>
+              <option value="🎵">🎵 音楽</option>
+              <option value="⭐">⭐ お気に入り</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="dialog-footer">
+          <button onClick={onClose}>キャンセル</button>
+          <button
+            className="primary"
+            onClick={handleSave}
+            disabled={!name.trim()}
+          >
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+#### 2.6.3 ヘルパー関数
+
+```typescript
+const formatSearchQuery = (query: SearchQuery): string => {
+  const parts: string[] = [];
+
+  // タグ
+  if (query.tags.include.length > 0) {
+    const tagNames = query.tags.include.map(id => getTagName(id));
+    parts.push(`タグ: ${tagNames.join(', ')}`);
+  }
+
+  // ファイル形式
+  if (query.fileTypes.length > 0) {
+    parts.push(`形式: ${query.fileTypes.join(', ')}`);
+  }
+
+  // ページ数
+  if (query.archivePageRange) {
+    const [min, max] = query.archivePageRange;
+    parts.push(`ページ数: ${min}〜${max}`);
+  }
+
+  // 長さ
+  if (query.durationRange) {
+    const [min, max] = query.durationRange;
+    parts.push(`長さ: ${formatDuration(min)}〜${formatDuration(max)}`);
+  }
+
+  return parts.join(', ');
+};
+```
+
+---
+
+## 3. スタイル定義
+
+### 3.1 サムネイル進捗UI
+
+```css
+.thumbnail-progress-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.2s;
+}
+
+.thumbnail-progress-indicator:hover {
+  background: var(--bg-hover);
+}
+
+.thumbnail-progress-detail {
+  position: fixed;
+  bottom: 48px;
+  right: 16px;
+  width: 400px;
+  background: var(--bg-paper);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xl);
+  z-index: 1000;
+}
+
+.progress-bar {
+  height: 8px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--primary-main);
+  transition: width 0.3s ease;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.stat-item .value.success {
+  color: var(--success);
+}
+
+.stat-item .value.error {
+  color: var(--error);
+}
+```
+
+### 3.2 保存済み検索UI
+
+```css
+.saved-search-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.saved-search-item:hover {
+  background: var(--bg-hover);
+}
+
+.search-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.search-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.search-query {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+```

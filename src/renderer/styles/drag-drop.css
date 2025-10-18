@@ -1,0 +1,160 @@
+/* renderer/styles/drag-drop.css */
+
+/* ドラッグプレビュー */
+.drag-preview {
+  position: fixed;
+  pointer-events: none;
+  z-index: 10000;
+  opacity: 0.9;
+}
+
+.preview-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-paper);
+  border: 2px solid var(--primary-main);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  min-width: 200px;
+}
+
+.preview-thumbnail {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.preview-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-hover);
+  border-radius: 4px;
+}
+
+.preview-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.preview-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.drag-icon {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: var(--primary-main);
+  color: white;
+  border-radius: 50%;
+  padding: 4px;
+}
+
+/* ドロップゾーン - 受け入れ可能 */
+.drag-over-accept {
+  position: relative;
+  background-color: rgba(25, 118, 210, 0.1);
+  border: 2px dashed var(--primary-main);
+  animation: dropZonePulse 1.5s ease-in-out infinite;
+}
+
+@keyframes dropZonePulse {
+  0%, 100% {
+    background-color: rgba(25, 118, 210, 0.05);
+    border-color: var(--primary-main);
+  }
+  50% {
+    background-color: rgba(25, 118, 210, 0.15);
+    border-color: var(--primary-light);
+  }
+}
+
+/* ドロップゾーン - 受け入れ不可 */
+.drag-over-reject {
+  background-color: rgba(244, 67, 54, 0.1);
+  border: 2px dashed var(--error);
+  cursor: not-allowed;
+}
+
+/* ドロップインジケーター */
+.drop-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(25, 118, 210, 0.9);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  z-index: 1;
+}
+
+/* 外部ファイルドロップゾーン */
+.external-drop-zone {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(4px);
+  z-index: 9999;
+}
+
+.external-drop-zone-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  color: white;
+}
+
+.external-drop-zone-icon {
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 4px dashed rgba(255, 255, 255, 0.5);
+  border-radius: 16px;
+  animation: dropZoneFloat 2s ease-in-out infinite;
+}
+
+@keyframes dropZoneFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.external-drop-zone-text {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.external-drop-zone-hint {
+  font-size: 16px;
+  opacity: 0.8;
+}
