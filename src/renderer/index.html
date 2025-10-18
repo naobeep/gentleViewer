@@ -2,15 +2,11 @@
 <html lang="ja">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>gentleViewer</title>
-    <!-- dev: Vite の publicDir に置いたファイルは /64.png で配信される -->
-    <link rel="icon" type="image/png" href="/64.png" />
-    <!-- prod/file:// 用のフォールバック（ビルド後の相対パス） -->
-    <link rel="icon" type="image/png" href="./64.png" />
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
+    <script type="module" src="./index.tsx"></script>
   </body>
 </html>

@@ -2,9 +2,7 @@ import React, { useEffect, useState } from 'react';
 
 type FileRec = { id: string; path: string; name: string };
 
-export const FileList: React.FC<{ onDoubleClick?: (filePath: string) => void }> = ({
-  onDoubleClick,
-}) => {
+export const FileList: React.FC<{ onOpen?: (filePath: string) => void }> = ({ onOpen }) => {
   const [files, setFiles] = useState<FileRec[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -35,27 +33,40 @@ export const FileList: React.FC<{ onDoubleClick?: (filePath: string) => void }> 
   }, []);
 
   return (
-    <div>
-      <div style={{ marginBottom: 8 }}>
-        <button onClick={loadFiles}>{loading ? '読み込み中...' : '再読み込み'}</button>
+    <div style={{ padding: 8 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+        <strong>Files</strong>
+        <button onClick={loadFiles} style={{ marginLeft: 'auto' }}>
+          {loading ? '読み込み中...' : '更新'}
+        </button>
       </div>
-      <div>
+
+      <div style={{ maxHeight: '60vh', overflow: 'auto' }}>
         {files.length === 0 ? (
           <div>ファイルがありません</div>
         ) : (
-          <ul style={{ listStyle: 'none', padding: 0 }}>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
             {files.map(f => (
               <li
                 key={f.id}
-                style={{ padding: 6, borderBottom: '1px solid #eee', cursor: 'pointer' }}
+                style={{ padding: 8, borderBottom: '1px solid #eee', cursor: 'pointer' }}
                 onDoubleClick={() =>
-                  onDoubleClick
-                    ? onDoubleClick(f.path)
-                    : (window as any).electronAPI.openViewer(f.path)
+                  onOpen ? onOpen(f.path) : (window as any).electronAPI.openViewer(f.path)
                 }
+                title={f.path}
               >
-                <div style={{ fontSize: 13 }}>{f.name}</div>
-                <div style={{ fontSize: 11, color: '#666' }}>{f.path}</div>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{f.name}</div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: '#666',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}
+                >
+                  {f.path}
+                </div>
               </li>
             ))}
           </ul>

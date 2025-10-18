@@ -1,16 +1,27 @@
-import { initDb } from '../services/db';
 import crypto from 'crypto';
+import { initDb } from '../services/db';
 
-export type Tag = { id: string; name: string; color?: string; created_at?: number };
+type DB = ReturnType<typeof initDb>;
 
-const db = () => initDb();
+const db = (): DB => initDb();
 
-export function createTag(name: string, color?: string) {
+export type Tag = {
+  id: string;
+  name: string;
+  color?: string | null;
+  description?: string | null;
+  created_at?: number;
+  updated_at?: number;
+};
+
+export function createTag(name: string, color?: string, description?: string) {
   const id = crypto.randomUUID();
   const now = Date.now();
   db()
-    .prepare(`INSERT INTO tags (id, name, color, created_at) VALUES (?, ?, ?, ?)`)
-    .run(id, name, color ?? null, now);
+    .prepare(
+      `INSERT INTO tags (id, name, color, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(id, name, color ?? null, description ?? null, now, now);
   return getTagById(id)!;
 }
 
@@ -19,7 +30,7 @@ export function getTagById(id: string): Tag | undefined {
 }
 
 export function listTags(): Tag[] {
-  return db().prepare(`SELECT * FROM tags ORDER BY name ASC`).all() as Tag[];
+  return db().prepare(`SELECT * FROM tags ORDER BY name COLLATE NOCASE ASC`).all() as Tag[];
 }
 
 export function deleteTag(id: string) {
@@ -27,9 +38,13 @@ export function deleteTag(id: string) {
 }
 
 export function addTagToFile(fileId: string, tagId: string) {
+  const id = crypto.randomUUID();
+  const now = Date.now();
   return db()
-    .prepare(`INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)`)
-    .run(fileId, tagId);
+    .prepare(
+      `INSERT OR IGNORE INTO file_tags (id, file_id, tag_id, created_at) VALUES (?, ?, ?, ?)`
+    )
+    .run(id, fileId, tagId, now);
 }
 
 export function removeTagFromFile(fileId: string, tagId: string) {
@@ -39,7 +54,7 @@ export function removeTagFromFile(fileId: string, tagId: string) {
 export function listTagsForFile(fileId: string) {
   return db()
     .prepare(
-      `SELECT t.* FROM tags t INNER JOIN file_tags ft ON t.id = ft.tag_id WHERE ft.file_id = ?`
+      `SELECT t.* FROM tags t INNER JOIN file_tags ft ON t.id = ft.tag_id WHERE ft.file_id = ? ORDER BY t.name COLLATE NOCASE ASC`
     )
     .all(fileId) as Tag[];
 }

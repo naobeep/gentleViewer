@@ -97,6 +97,51 @@ const expose = {
     if (!res?.ok) throw new Error(res?.error ?? 'open-viewer failed');
     return true;
   },
+
+  // 外部アプリでファイルを開く
+  openFileExternally: async (filePath: string) => {
+    const res = await ipcRenderer.invoke('open-file-default', filePath);
+    if (!res?.ok) throw new Error(res?.error ?? 'open-file-default failed');
+    return true;
+  },
+
+  // tags
+  getTags: async () => {
+    const res = await ipcRenderer.invoke('get-tags');
+    return res?.ok ? res.data : [];
+  },
+  createTag: async (payload: { name: string; color?: string; description?: string }) => {
+    const res = await ipcRenderer.invoke('create-tag', payload);
+    if (!res?.ok) throw new Error(res?.error ?? 'create-tag failed');
+    return res.data;
+  },
+  deleteTag: async (id: string) => {
+    const res = await ipcRenderer.invoke('delete-tag', id);
+    return res?.ok ?? false;
+  },
+  addTagToFile: async (fileId: string, tagId: string) => {
+    const res = await ipcRenderer.invoke('add-tag-to-file', fileId, tagId);
+    return res?.ok ?? false;
+  },
+  removeTagFromFile: async (fileId: string, tagId: string) => {
+    const res = await ipcRenderer.invoke('remove-tag-from-file', fileId, tagId);
+    return res?.ok ?? false;
+  },
+  listTagsForFile: async (fileId: string) => {
+    const res = await ipcRenderer.invoke('list-tags-for-file', fileId);
+    return res?.ok ? res.data : [];
+  },
+  // search
+  searchFiles: async (payload: {
+    text?: string;
+    includeTagIds?: string[];
+    excludeTagIds?: string[];
+    limit?: number;
+    offset?: number;
+  }) => {
+    const res = await ipcRenderer.invoke('search-files', payload);
+    return res?.ok ? res.data : [];
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', expose);
