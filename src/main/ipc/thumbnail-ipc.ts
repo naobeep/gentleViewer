@@ -1,99 +1,96 @@
 import { ipcMain, BrowserWindow } from 'electron';
-import type {
-  SavedSearch,
-  SearchQuery,
-  ThumbnailGenerationProgress,
-  ThumbnailError,
-} from '../../shared/types/thumbnail';
-import { thumbnailGenerator } from '../services/thumbnail-generator';
-import {
-  getSavedSearches,
-  saveSavedSearch,
-  updateSearchExecutionCount,
-} from '../services/saved-searches';
+import { thumbnailGenerator, getCachedThumbnailPathFor } from '../services/thumbnail-generator';
 
-function broadcast(channel: string, ...args: any[]) {
-  BrowserWindow.getAllWindows().forEach(w => {
-    try {
-      w.webContents.send(channel, ...args);
-    } catch {
-      // ignore send errors per-window
-    }
-  });
-}
-
+/**
+ * サムネイル生成用 IPC ハンドラを登録
+ * - thumbnail-start: filePaths[] を受け取り生成を開始 (returns { ok: true })
+ * - thumbnail-pause / resume / cancel: control
+ * 進捗は 'thumbnail-progress'、エラーは 'thumbnail-error' イベントで renderer に通知する
+ */
 export function registerThumbnailIpc() {
-  // thumbnail control handlers
-  ipcMain.handle('thumbnail-start', async (_event, filePaths: string[]) => {
+  // 冪等: 既存ハンドラを削除
+  const channels = ['thumbnail-start', 'thumbnail-pause', 'thumbnail-resume', 'thumbnail-cancel'];
+  for (const ch of channels) {
     try {
-      // 開発時デバッグ用: 空配列ならサンプル進捗を送る
-      if (
-        Array.isArray(filePaths) &&
-        filePaths.length === 0 &&
-        process.env.NODE_ENV !== 'production'
-      ) {
-        console.info('[ipc] thumbnail-start: empty filePaths -> simulate progress (dev)');
-        void (async () => {
-          const total = 6;
-          for (let i = 1; i <= total; i++) {
-            await new Promise(r => setTimeout(r, 400));
+      ipcMain.removeHandler(ch);
+    } catch {}
+  }
+
+  // リスナの重複防止
+  thumbnailGenerator.removeAllListeners('progress');
+  thumbnailGenerator.removeAllListeners('error');
+
+  // broadcast helper
+  const broadcast = (channel: string, payload: any) => {
+    const wins = BrowserWindow.getAllWindows();
+    for (const w of wins) {
+      try {
+        w.webContents.send(channel, payload);
+      } catch {}
+    }
+  };
+
+  thumbnailGenerator.on('progress', p => {
+    broadcast('thumbnail-progress', p);
+  });
+  thumbnailGenerator.on('error', e => {
+    broadcast('thumbnail-error', e);
+  });
+
+  ipcMain.handle('thumbnail-start', async (_evt, filePaths: string[] = []) => {
+    try {
+      const arr = Array.isArray(filePaths) ? filePaths : [];
+      const isDev = process.env.NODE_ENV !== 'production' || !!process.env.ELECTRON_START_URL;
+
+      // Dev-simulate: 空配列で呼ばれた場合、開発用の進捗シミュレーションを非同期で行う
+      if (isDev && arr.length === 0) {
+        (async () => {
+          try {
+            const total = 5;
+            let completed = 0;
+            let skipped = 0;
+            let errors = 0;
+            for (let i = 1; i <= total; i++) {
+              if (thumbnailGenerator['\u005FisCancelled']) break;
+              // simulate processing delay
+              await new Promise(r => setTimeout(r, 300));
+              completed++;
+              const progress = {
+                status: i === total ? 'completed' : 'running',
+                total,
+                completed,
+                skipped,
+                errors,
+                currentFile: `dev-sample-${i}.jpg`,
+                startedAt: Date.now(),
+                updatedAt: Date.now(),
+              };
+              broadcast('thumbnail-progress', progress);
+            }
+            // final emit
             broadcast('thumbnail-progress', {
-              status: i < total ? 'running' : 'completed',
-              total,
-              completed: i,
-              skipped: 0,
-              errors: 0,
-              currentFile: `dev-simulated-${i}.jpg`,
-              estimatedTimeRemaining: null,
-              startedAt: Date.now(),
+              status: 'completed',
+              total: 5,
+              completed,
+              skipped,
+              errors,
               updatedAt: Date.now(),
-            } as ThumbnailGenerationProgress);
+            });
+          } catch (e) {
+            broadcast('thumbnail-error', { error: e instanceof Error ? e.message : String(e) });
           }
         })();
-        return { started: true, simulated: true };
+        return { ok: true, started: true, simulated: true };
       }
 
-      void (async () => {
-        try {
-          await thumbnailGenerator.generateThumbnails(Array.isArray(filePaths) ? filePaths : []);
-        } catch (e) {
-          const msg = e instanceof Error ? e.stack || e.message : String(e);
-          console.error('[thumbnail-generator] background error:', msg);
-          broadcast('thumbnail-error', {
-            error: msg,
-            timestamp: Date.now(),
-          } as ThumbnailError);
-        }
-      })();
-      return { started: true };
+      // production / normal flow: delegate to generator (non-blocking)
+      thumbnailGenerator.generateThumbnails(arr).catch(e => {
+        broadcast('thumbnail-error', { error: e instanceof Error ? e.message : String(e) });
+      });
+      return { ok: true, started: true };
     } catch (err) {
-      console.error('[ipc] thumbnail-start handler failed:', err);
-      return { started: false, error: (err as Error).message || String(err) };
-    }
-  });
-
-  // テスト用 ping/pong ハンドラ（堅牢化）
-  ipcMain.handle('ipc-test-ping', async (_event, payload: any) => {
-    try {
-      const res = { ok: true, echo: payload, ts: Date.now() };
-      try {
-        BrowserWindow.getAllWindows().forEach(w => {
-          try {
-            w.webContents.send('ipc-test-pong', res);
-          } catch (sendErr) {
-            console.warn(
-              '[ipc] send to window failed:',
-              sendErr instanceof Error ? sendErr.message : String(sendErr)
-            );
-          }
-        });
-      } catch (bErr) {
-        console.warn('[ipc] broadcast iteration failed:', bErr);
-      }
-      return res;
-    } catch (err) {
-      console.error('[ipc] ipc-test-ping handler error:', err);
-      throw err; // invoke 側にも例外情報を返す
+      console.error('[ipc] thumbnail-start error', err);
+      return { ok: false, error: String(err) };
     }
   });
 
@@ -102,7 +99,7 @@ export function registerThumbnailIpc() {
       thumbnailGenerator.pause();
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: (err as Error).message || String(err) };
+      return { ok: false, error: String(err) };
     }
   });
 
@@ -111,7 +108,7 @@ export function registerThumbnailIpc() {
       thumbnailGenerator.resume();
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: (err as Error).message || String(err) };
+      return { ok: false, error: String(err) };
     }
   });
 
@@ -120,58 +117,27 @@ export function registerThumbnailIpc() {
       thumbnailGenerator.cancel();
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: (err as Error).message || String(err) };
+      return { ok: false, error: String(err) };
     }
   });
 
-  // forward generator events to renderer windows
-  try {
-    thumbnailGenerator.on('progress', (data: ThumbnailGenerationProgress) => {
-      broadcast('thumbnail-progress', data);
-    });
-
-    thumbnailGenerator.on('error', (err: ThumbnailError) => {
-      broadcast('thumbnail-error', err);
-    });
-  } catch {
-    // thumbnailGenerator may not support events -> ignore
-  }
-
-  // saved searches handlers
-  ipcMain.handle('get-saved-searches', async () => {
+  // get single thumbnail path
+  ipcMain.handle('get-thumbnail-path', async (_evt, filePath: string) => {
     try {
-      const list = await getSavedSearches();
-      return list;
+      const p = await getCachedThumbnailPathFor(String(filePath));
+      return { ok: true, path: p };
     } catch (err) {
-      return [];
+      return { ok: false, error: String(err) };
     }
   });
-
-  ipcMain.handle('save-saved-search', async (_evt, search: SavedSearch) => {
+  // get multiple thumbnail paths (preserves order)
+  ipcMain.handle('get-thumbnail-paths', async (_evt, filePaths: string[] = []) => {
     try {
-      await saveSavedSearch(search);
-      return { ok: true };
+      const arr = Array.isArray(filePaths) ? filePaths : [];
+      const results = await Promise.all(arr.map(fp => getCachedThumbnailPathFor(String(fp))));
+      return { ok: true, paths: results };
     } catch (err) {
-      return { ok: false, error: (err as Error).message || String(err) };
-    }
-  });
-
-  ipcMain.handle('execute-search', async (_evt, query: SearchQuery) => {
-    try {
-      // inform renderer(s) to run the search (UI layer handles actual execution)
-      broadcast('execute-search', query);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message || String(err) };
-    }
-  });
-
-  ipcMain.handle('update-search-execution-count', async (_evt, id: string) => {
-    try {
-      await updateSearchExecutionCount(id);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message || String(err) };
+      return { ok: false, error: String(err) };
     }
   });
 }

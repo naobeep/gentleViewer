@@ -1,0 +1,76 @@
+# [ipc] preload の contextBridge を確定して dev-stub を削除
+
+目的
+- preload 経由で公開する API を最終化し、dev 用のスタブを削除する。
+
+受け入条件
+- window.electronAPI が所定のメソッドをすべて持つ（startThumbnailGeneration / getFiles / getThumbnailPath など）
+- ipcTestPing が成功する
+- Renderer は dev-stub を使わずに動作する
+
+実装メモ
+- src/preload/thumbnail.ts を最終形に固定（既存のアンラップ実装を採用）
+- main の BrowserWindow.webPreferences を確認（contextIsolation: true, nodeIntegration: false）
+- テスト: Renderer 側で !!window.electronAPI をチェックする簡易テストを追加
+ラベル: phase0, ipc, security
+
+# [dev] thumbnail start の dev-simulate 実装（置換/削除）
+
+目的
+- 開発時に空 input で進捗をシミュレートできる dev-simulate を提供し、最終的に本実装と切り替え可能にする。
+
+受け入条件
+- 開発モードで startThumbnailGeneration([]) を呼ぶと progress イベントが発生する
+- 本番ビルドでは simulate のコードが動作しない（NODE_ENV 条件）
+
+実装メモ
+- thumbnail-ipc に dev 検知ロジックを追加（すでに PoC を適用済み）
+- simulate のイベントフォーマットを ThumbnailGenerationProgress に一致させる
+- docs に使い方記載
+ラベル: dev, thumbnail, phase0
+
+# [db] DB マイグレーション雛形追加 (files / saved_searches / tags)
+
+目的
+- 初回インストール時に必要なテーブルを作成するマイグレーションを用意する。
+
+受け入条件
+- migrations フォルダに 001_init.sql が存在する
+- runAllMigrations を実行すると files / saved_searches / tags / file_tags / migrations テーブルが作成される
+- dist ビルド後にもマイグレーションが実行可能である
+
+実装メモ
+- 001_init.sql にテーブル定義を追加（id TEXT PRIMARY KEY, path TEXT UNIQUE, name TEXT, size INTEGER, created_at INTEGER, updated_at INTEGER 等）
+- runAllMigrations が BEGIN/COMMIT を含む SQL を扱えることを確認済み
+- CI で migrations を自動実行するスクリプトを追加すると良い
+ラベル: db, phase1
+
+# [ui] Viewer 起動フローの UI 結合（ファイルリスト→ビューワ）
+
+目的
+- FileList からダブルクリックで新しいビューワウィンドウを開き、ファイルを表示できるようにする。
+
+受け入条件
+- FileList のダブルクリックで window.electronAPI.openViewer(filePath) が呼ばれ、新ウィンドウが開く
+- Renderer に #viewer ルート（パラメータ path）でファイルを表示する簡易コンポーネントが存在する（画像/PDF の表示で可）
+- セキュリティ: 新ウィンドウの preload/contextIsolation 設定が安全である
+
+実装メモ
+- viewer ルートは簡易実装で良い（<img> / PDF.js 等は後で拡張）
+- openViewer は既に main 側で実装済み。Renderer のルーティングと連携させる
+ラベル: ui, viewer, phase1
+
+# [ci] CI の Windows ビルド確認（Windows runner）
+
+目的
+- Windows 環境で main / renderer のビルドとテストが通ることを確認する。
+
+受け入条件
+- GitHub Actions の windows-latest ジョブで npm ci && npm run build が成功する
+- sharp などのネイティブモジュールが Windows 上でインストール可能である
+
+実装メモ
+- .github/workflows/ci.yml に windows-latest ジョブを追加
+- 必要なら Windows 用の build キャッシュ（actions/cache）を導入
+- ネイティブモジュールのビルドログが出たら対処手順をドキュメント化
+ラベル: ci, infra

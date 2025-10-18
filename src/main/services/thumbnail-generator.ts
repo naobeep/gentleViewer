@@ -1,140 +1,179 @@
 import { EventEmitter } from 'events';
 import path from 'path';
-import fs from 'fs/promises';
-import pLimit from 'p-limit';
-import { ThumbnailGenerationProgress, ThumbnailError } from '../../shared/types/thumbnail';
+import fs from 'fs';
+import crypto from 'crypto';
+import sharp from 'sharp';
+import { app } from 'electron';
+import type { ThumbnailGenerationProgress, ThumbnailError } from '../../shared/types/thumbnail';
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-class ThumbnailGenerator extends EventEmitter {
-  private queue: string[] = [];
-  private isRunning = false;
-  private isPaused = false;
-  private limit = pLimit(3);
-
-  private progress: ThumbnailGenerationProgress = {
-    total: 0,
-    completed: 0,
-    skipped: 0,
-    errors: 0,
-    currentFile: null,
-    estimatedTimeRemaining: null,
-    status: 'idle',
-  };
-
-  async generateThumbnails(filePaths: string[]) {
-    if (!filePaths || filePaths.length === 0) return;
-    this.queue = [...filePaths];
-    this.progress.total = filePaths.length;
-    this.progress.completed = 0;
-    this.progress.skipped = 0;
-    this.progress.errors = 0;
-    this.progress.status = 'running';
-    this.isRunning = true;
-
-    const startTime = Date.now();
-
+// 公開ユーティリティ: 指定ファイルに対応するキャッシュパスを返す（存在チェック含む）
+export async function getCachedThumbnailPathFor(filePath: string): Promise<string | null> {
+  try {
+    const cacheDir = path.join(app.getPath('userData'), 'thumbnail-cache');
+    await fs.promises.mkdir(cacheDir, { recursive: true });
+    let stat: fs.Stats | null = null;
     try {
-      const tasks = this.queue.map((filePath) =>
-        this.limit(async () => {
-          if (!this.isRunning) return;
-
-          while (this.isPaused) {
-            await sleep(100);
-          }
-
-          this.progress.currentFile = path.basename(filePath);
-          this.emitProgress();
-
-          try {
-            const exists = await this.checkCachedThumbnail(filePath);
-            if (exists) {
-              this.progress.skipped++;
-            } else {
-              await this.generateSingleThumbnail(filePath);
-            }
-            this.progress.completed++;
-          } catch (err) {
-            this.progress.errors++;
-            const errorObj: ThumbnailError = {
-              filePath,
-              fileName: path.basename(filePath),
-              error: err instanceof Error ? err.message : String(err),
-              timestamp: Date.now(),
-            };
-            this.emit('error', errorObj);
-          }
-
-          const elapsed = Date.now() - startTime;
-          const rate = elapsed > 0 ? this.progress.completed / elapsed : 0;
-          const remaining = this.progress.total - this.progress.completed;
-          this.progress.estimatedTimeRemaining = rate > 0 ? Math.ceil((remaining / rate) / 1000) : null;
-
-          this.emitProgress();
-        })
-      );
-
-      await Promise.all(tasks);
-
-      if (this.isRunning) {
-        this.progress.status = 'completed';
-        this.progress.currentFile = null;
-        this.emitProgress();
-        this.isRunning = false;
-      }
-    } catch (error) {
-      this.progress.status = 'error';
-      this.emitProgress();
-      this.isRunning = false;
-    }
-  }
-
-  pause() {
-    this.isPaused = true;
-    this.progress.status = 'paused';
-    this.emitProgress();
-  }
-
-  resume() {
-    this.isPaused = false;
-    this.progress.status = 'running';
-    this.emitProgress();
-  }
-
-  cancel() {
-    this.isRunning = false;
-    this.queue = [];
-    this.progress.status = 'idle';
-    this.progress.currentFile = null;
-    this.emitProgress();
-  }
-
-  private emitProgress() {
-    this.emit('progress', { ...this.progress });
-  }
-
-  private async generateSingleThumbnail(filePath: string): Promise<void> {
-    const thumbsDir = path.join(path.dirname(filePath), '.gentle_thumbs');
-    try {
-      await fs.mkdir(thumbsDir, { recursive: true });
-      await sleep(300 + Math.random() * 700);
-      const thumbPath = path.join(thumbsDir, path.basename(filePath) + '.thumb');
-      await fs.writeFile(thumbPath, 'thumbnail');
-    } catch (e) {
-      throw e;
-    }
-  }
-
-  private async checkCachedThumbnail(filePath: string): Promise<boolean> {
-    const thumbsDir = path.join(path.dirname(filePath), '.gentle_thumbs');
-    const thumbPath = path.join(thumbsDir, path.basename(filePath) + '.thumb');
-    try {
-      await fs.access(thumbPath);
-      return true;
+      stat = await fs.promises.stat(filePath);
     } catch {
-      return false;
+      stat = null;
     }
+    const h = crypto.createHash('sha1');
+    h.update(filePath);
+    if (stat?.mtimeMs) h.update(String(stat.mtimeMs));
+    const hash = h.digest('hex');
+    const outPath = path.join(cacheDir, `${hash}.jpg`);
+    const exists = await fs.promises
+      .access(outPath, fs.constants.R_OK)
+      .then(() => true)
+      .catch(() => false);
+    return exists ? outPath : null;
+  } catch {
+    return null;
   }
 }
 
-export const thumbnailGenerator = new ThumbnailGenerator();
+export class ThumbnailGenerator extends EventEmitter {
+  private _isPaused = false;
+  private _isCancelled = false;
+  private _concurrency = 2;
+
+  constructor(concurrency = 2) {
+    super();
+    this._concurrency = concurrency;
+  }
+
+  private async ensureCacheDir() {
+    const cacheDir = path.join(app.getPath('userData'), 'thumbnail-cache');
+    await fs.promises.mkdir(cacheDir, { recursive: true });
+    return cacheDir;
+  }
+
+  private async hashFor(filePath: string, mtimeMs?: number) {
+    const h = crypto.createHash('sha1');
+    h.update(filePath);
+    if (mtimeMs) h.update(String(mtimeMs));
+    return h.digest('hex');
+  }
+
+  async generateThumbnails(filePaths: string[]) {
+    this._isCancelled = false;
+    this._isPaused = false;
+
+    const cacheDir = await this.ensureCacheDir();
+    const total = filePaths.length || 0;
+    let completed = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    const queue = filePaths.slice();
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        if (this._isCancelled) return;
+        if (this._isPaused) {
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+
+        const file = queue.shift()!;
+        try {
+          let stat: fs.Stats | null = null;
+          try {
+            stat = await fs.promises.stat(file);
+          } catch {
+            stat = null;
+          }
+
+          const hash = await this.hashFor(file, stat?.mtimeMs);
+          const outPath = path.join(cacheDir, `${hash}.jpg`);
+
+          // if cached and exists, skip regen
+          const exists = await fs.promises
+            .access(outPath, fs.constants.R_OK)
+            .then(() => true)
+            .catch(() => false);
+
+          if (!exists) {
+            // generate thumbnail -> width 400 (PoC)
+            await sharp(file)
+              .resize({ width: 400, withoutEnlargement: true })
+              .jpeg({ quality: 78 })
+              .toFile(outPath);
+          } else {
+            skipped++;
+          }
+
+          completed++;
+          const progress: ThumbnailGenerationProgress = {
+            status: queue.length === 0 ? 'completed' : 'running',
+            total,
+            completed,
+            skipped,
+            errors,
+            currentFile: file,
+            startedAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          this.emit('progress', progress);
+        } catch (e) {
+          errors++;
+          const err: ThumbnailError = {
+            filePath: file,
+            error: e instanceof Error ? e.message : String(e),
+            timestamp: Date.now(),
+          };
+          this.emit('error', err);
+        }
+      }
+    };
+
+    // start workers
+    const workers = [];
+    const n = Math.max(1, Math.min(this._concurrency, filePaths.length));
+    for (let i = 0; i < n; i++) workers.push(worker());
+    await Promise.all(workers);
+
+    // final progress emit
+    this.emit('progress', {
+      status: this._isCancelled ? 'idle' : 'completed',
+      total,
+      completed,
+      skipped,
+      errors,
+      updatedAt: Date.now(),
+    } as ThumbnailGenerationProgress);
+  }
+
+  pause() {
+    this._isPaused = true;
+    this.emit('progress', {
+      status: 'paused',
+      total: 0,
+      completed: 0,
+      skipped: 0,
+      errors: 0,
+    } as ThumbnailGenerationProgress);
+  }
+  resume() {
+    this._isPaused = false;
+    this.emit('progress', {
+      status: 'running',
+      total: 0,
+      completed: 0,
+      skipped: 0,
+      errors: 0,
+    } as ThumbnailGenerationProgress);
+  }
+  cancel() {
+    this._isCancelled = true;
+    this.emit('progress', {
+      status: 'idle',
+      total: 0,
+      completed: 0,
+      skipped: 0,
+      errors: 0,
+    } as ThumbnailGenerationProgress);
+  }
+}
+
+export const thumbnailGenerator = new ThumbnailGenerator(2);

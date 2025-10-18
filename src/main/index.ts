@@ -2,6 +2,11 @@ import { app, BrowserWindow, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { registerThumbnailIpc } from './ipc/thumbnail-ipc';
+import { registerDataIpc } from './ipc/data-ipc';
+import { registerViewerIpc } from './ipc/viewer-ipc';
+import { runAllMigrations } from './services/db';
+import os from 'os';
+const BetterSqlite3: typeof import('better-sqlite3') = require('better-sqlite3');
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -76,9 +81,24 @@ async function createWindow() {
 
 app.on('ready', async () => {
   try {
+    // マイグレーション実行（migrations フォルダ内の未適用 SQL を順次実行）
+    try {
+      const migrationsDir = path.join(__dirname, '../migrations');
+      const applied = runAllMigrations(migrationsDir);
+      console.info(`DB migrations applied: ${applied.length} files`);
+    } catch (migErr) {
+      console.error('Failed to apply DB migrations:', migErr);
+    }
+
     try {
       registerThumbnailIpc();
       console.info('registerThumbnailIpc: OK');
+      // data IPC 登録
+      registerDataIpc();
+      console.info('registerDataIpc: OK');
+      // viewer IPC 登録
+      registerViewerIpc();
+      console.info('registerViewerIpc: OK');
     } catch (e) {
       console.error('registerThumbnailIpc failed (caught):', e);
     }
@@ -106,3 +126,28 @@ app.on('activate', async () => {
 process.on('uncaughtException', err => {
   console.error('Uncaught exception:', err);
 });
+
+function initDb(): import('better-sqlite3').Database {
+  // Prefer Electron userData; fall back to a sensible home-directory path for tests/dev.
+  const baseDir =
+    app && typeof app.getPath === 'function'
+      ? app.getPath('userData')
+      : path.join(os.homedir(), '.gentleViewer');
+
+  fs.mkdirSync(baseDir, { recursive: true });
+  const dbPath = path.join(baseDir, 'gentleViewer.sqlite3');
+
+  const db = new BetterSqlite3(dbPath);
+
+  // Safe default pragmas
+  try {
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('foreign_keys = ON');
+  } catch (e) {
+    console.warn('Failed to set SQLite pragmas:', e);
+  }
+
+  return db;
+}
+// duplicate stub removed; keep the implemented initDb above
