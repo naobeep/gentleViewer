@@ -11,22 +11,82 @@ export async function getCachedThumbnailPathFor(filePath: string): Promise<strin
   try {
     const cacheDir = path.join(app.getPath('userData'), 'thumbnail-cache');
     await fs.promises.mkdir(cacheDir, { recursive: true });
+    const mappingFile = path.join(cacheDir, 'mapping.json');
+
+    // Normalize path: try realpath, fallback to resolved input
+    let realP: string;
+    try {
+      realP = await fs.promises.realpath(filePath);
+    } catch {
+      realP = path.resolve(filePath);
+    }
+
+    // try to stat the resolved path
     let stat: fs.Stats | null = null;
     try {
-      stat = await fs.promises.stat(filePath);
+      stat = await fs.promises.stat(realP);
     } catch {
       stat = null;
     }
-    const h = crypto.createHash('sha1');
-    h.update(filePath);
-    if (stat?.mtimeMs) h.update(String(stat.mtimeMs));
-    const hash = h.digest('hex');
-    const outPath = path.join(cacheDir, `${hash}.jpg`);
-    const exists = await fs.promises
-      .access(outPath, fs.constants.R_OK)
-      .then(() => true)
-      .catch(() => false);
-    return exists ? outPath : null;
+
+    const tryExists = async (candidate: string) =>
+      fs.promises
+        .access(candidate, fs.constants.R_OK)
+        .then(() => true)
+        .catch(() => false);
+
+    // 1) check mapping.json first (fast, authoritative once generator ran)
+    try {
+      const raw = await fs.promises.readFile(mappingFile, 'utf8').catch(() => '');
+      if (raw) {
+        const map = JSON.parse(raw) as Record<string, string>;
+        const candidatesFromMap = [realP, filePath, realP.toLowerCase()].filter(Boolean);
+        for (const key of candidatesFromMap) {
+          const mapped = map[key];
+          if (mapped) {
+            const p = path.join(cacheDir, mapped);
+            if (await tryExists(p)) return p;
+          }
+        }
+      }
+    } catch {
+      // ignore parse/read errors and continue to heuristics
+    }
+
+    // fallback heuristics (try several hash variants)
+    const candidates: string[] = [];
+    const h1 = crypto.createHash('sha1');
+    h1.update(realP);
+    if (stat?.mtimeMs) h1.update(String(stat.mtimeMs));
+    candidates.push(path.join(cacheDir, `${h1.digest('hex')}.jpg`));
+    const h2 = crypto.createHash('sha1').update(realP).digest('hex');
+    candidates.push(path.join(cacheDir, `${h2}.jpg`));
+    if (filePath !== realP) {
+      const h3 = crypto
+        .createHash('sha1')
+        .update(filePath + (stat?.mtimeMs ? String(stat.mtimeMs) : ''))
+        .digest('hex');
+      candidates.push(path.join(cacheDir, `${h3}.jpg`));
+      const h4 = crypto.createHash('sha1').update(filePath).digest('hex');
+      candidates.push(path.join(cacheDir, `${h4}.jpg`));
+    }
+    if (process.platform === 'win32') {
+      const lower = realP.toLowerCase();
+      const hl = crypto
+        .createHash('sha1')
+        .update(lower + (stat?.mtimeMs ? String(stat.mtimeMs) : ''))
+        .digest('hex');
+      candidates.push(path.join(cacheDir, `${hl}.jpg`));
+      const hl2 = crypto.createHash('sha1').update(lower).digest('hex');
+      candidates.push(path.join(cacheDir, `${hl2}.jpg`));
+    }
+
+    for (const c of candidates) {
+      if (!c) continue;
+      if (await tryExists(c)) return c;
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -99,8 +159,39 @@ export class ThumbnailGenerator extends EventEmitter {
               .resize({ width: 400, withoutEnlargement: true })
               .jpeg({ quality: 78 })
               .toFile(outPath);
+            // update mapping.json
+            try {
+              const mappingFile = path.join(cacheDir, 'mapping.json');
+              const realP = await fs.promises.realpath(file).catch(() => path.resolve(file));
+              const raw = await fs.promises.readFile(mappingFile, 'utf8').catch(() => '{}');
+              const map = raw ? JSON.parse(raw) : {};
+              map[realP] = path.basename(outPath);
+              map[file] = path.basename(outPath);
+              if (process.platform === 'win32') map[realP.toLowerCase()] = path.basename(outPath);
+              await fs.promises.writeFile(mappingFile, JSON.stringify(map), 'utf8').catch(() => {});
+            } catch {
+              /* ignore mapping write errors */
+            }
           } else {
             skipped++;
+            // ensure mapping exists even if cache already existed
+            try {
+              const mappingFile = path.join(cacheDir, 'mapping.json');
+              const realP = await fs.promises.realpath(file).catch(() => path.resolve(file));
+              const raw = await fs.promises.readFile(mappingFile, 'utf8').catch(() => '{}');
+              const map = raw ? JSON.parse(raw) : {};
+              const bn = path.basename(outPath);
+              if (map[realP] !== bn) {
+                map[realP] = bn;
+                map[file] = bn;
+                if (process.platform === 'win32') map[realP.toLowerCase()] = bn;
+                await fs.promises
+                  .writeFile(mappingFile, JSON.stringify(map), 'utf8')
+                  .catch(() => {});
+              }
+            } catch {
+              /* ignore mapping write errors */
+            }
           }
 
           completed++;

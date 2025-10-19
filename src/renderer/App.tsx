@@ -34,14 +34,24 @@ export default function App(): JSX.Element {
   const [searchResults, setSearchResults] = useState<FileRec[] | null>(null);
 
   useEffect(() => {
-    console.log('App mounted'); // <- レンダリング確認用ログ
+    console.log('App mounted');
     loadFiles();
-    const unsub = (window as any).electronAPI.onThumbnailProgress((p: any) => {
-      if (p?.status === 'completed') loadFiles();
-    });
+    let unsub: (() => void) | null = null;
+    try {
+      const handler = (p: any) => {
+        if (p?.status === 'completed') loadFiles();
+      };
+      if ((window as any).electronAPI.onThumbnailProgress) {
+        unsub = (window as any).electronAPI.onThumbnailProgress(handler);
+      } else if ((window as any).electronAPI.on) {
+        unsub = (window as any).electronAPI.on('thumbnail-progress', handler);
+      }
+    } catch (err) {
+      console.error('subscribe thumbnail progress failed', err);
+    }
     return () => {
       try {
-        unsub();
+        if (typeof unsub === 'function') unsub();
       } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -51,7 +61,13 @@ export default function App(): JSX.Element {
     setLoading(true);
     try {
       const res = await (window as any).electronAPI.getFiles({ limit: 200 });
-      setFiles(Array.isArray(res) ? res : []);
+      let arr: any[] = [];
+      if (Array.isArray(res)) arr = res;
+      else if (res && typeof res === 'object') {
+        if (Array.isArray(res.data)) arr = res.data;
+        else if (res.ok && Array.isArray(res.result)) arr = res.result;
+      }
+      setFiles(arr);
     } catch (e) {
       console.error('loadFiles', e);
       setFiles([]);
@@ -86,6 +102,17 @@ export default function App(): JSX.Element {
     (window as any).electronAPI
       .openViewer(p)
       .catch((e: any) => console.error('openViewer failed', e));
+  };
+
+  const reindexFTS = async () => {
+    if (!confirm('FTS 再インデックスを実行しますか？（重い処理です）')) return;
+    try {
+      const res = await (window as any).electronAPI.reindexFTS();
+      alert('再インデックス完了: ' + (res.rowsAffected ?? 0) + ' 件');
+    } catch (e) {
+      console.error('reindexFTS failed', e);
+      alert('再インデックスに失敗しました: ' + String(e));
+    }
   };
 
   return (
@@ -126,6 +153,9 @@ export default function App(): JSX.Element {
           <div>
             <button onClick={loadFiles} style={{ marginRight: 8 }}>
               {loading ? '読み込み中...' : '再読み込み'}
+            </button>
+            <button onClick={reindexFTS} style={{ marginRight: 8 }}>
+              FTS再インデックス
             </button>
           </div>
         </header>

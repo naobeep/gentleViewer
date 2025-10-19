@@ -27,7 +27,6 @@ export function upsertFile(
   record: Omit<FileRecord, 'created_at' | 'updated_at' | 'id'> & { id?: string }
 ) {
   const now = Date.now();
-  // try update by path first
   const existing = getFileByPath(record.path);
   if (existing) {
     db()
@@ -42,16 +41,7 @@ export function upsertFile(
         now,
         record.path
       );
-    // ensure FTS updated
-    const id = existing.id;
-    const row = db().prepare(`SELECT rowid FROM files WHERE id = ?`).get(id) as
-      | { rowid?: number }
-      | undefined;
-    if (row && row.rowid) {
-      db()
-        .prepare(`INSERT OR REPLACE INTO files_fts(rowid, path, name) VALUES (?, ?, ?)`)
-        .run(row.rowid, record.path, record.name);
-    }
+    // FTS は DB トリガで同期されるためここでは何もしない
     return getFileById(existing.id)!;
   }
   const id = record.id ?? crypto.randomUUID();
@@ -73,16 +63,7 @@ export function upsertFile(
       now
     );
 
-  // update FTS index for the new row
-  const row = db().prepare(`SELECT rowid FROM files WHERE id = ?`).get(id) as
-    | { rowid?: number }
-    | undefined;
-  if (row && row.rowid) {
-    db()
-      .prepare(`INSERT OR REPLACE INTO files_fts(rowid, path, name) VALUES (?, ?, ?)`)
-      .run(row.rowid, record.path, record.name);
-  }
-
+  // トリガが files_fts を更新するのでここでは何もしない
   return getFileById(id)!;
 }
 

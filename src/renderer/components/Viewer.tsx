@@ -1,4 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
+import ImageViewer from './ImageViewer';
+import MetadataPanel from './MetadataPanel';
+import PdfViewer from './PdfViewer';
 
 type Props = {
   filePath: string;
@@ -20,6 +23,7 @@ const toFileUrl = (p?: string | null) => {
 export const Viewer: React.FC<Props> = ({ filePath }) => {
   const e = ext(filePath);
   const src = toFileUrl(filePath);
+  const [showMeta, setShowMeta] = useState(false);
 
   const handleOpenExternally = async () => {
     try {
@@ -37,23 +41,31 @@ export const Viewer: React.FC<Props> = ({ filePath }) => {
         <div style={{ fontSize: 13, color: '#444' }}>{filePath}</div>
         <div style={{ marginLeft: 'auto' }}>
           <button onClick={handleOpenExternally}>外部アプリで開く</button>
+          <button onClick={() => setShowMeta(s => !s)} style={{ marginLeft: 8 }}>
+            {showMeta ? 'メタ非表示' : 'メタ表示'}
+          </button>
         </div>
       </div>
 
       <div style={{ border: '1px solid #ddd', borderRadius: 6, padding: 8, minHeight: 300 }}>
-        {['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'].includes(e) && src && (
-          // eslint-disable-next-line jsx-a11y/img-redundant-alt
-          <img
-            src={src}
-            alt="image"
-            style={{ maxWidth: '100%', maxHeight: '80vh', display: 'block', margin: '0 auto' }}
-          />
+        {/* 画像 */}
+        {['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'].includes(e) && filePath && (
+          <div style={{ display: 'flex', gap: 12 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <ImageViewer filePath={filePath} showMeta={false} />
+            </div>
+            {showMeta && (
+              <aside style={{ width: 320, borderLeft: '1px solid #eee', paddingLeft: 12 }}>
+                <MetadataPanel filePath={filePath} />
+              </aside>
+            )}
+          </div>
         )}
 
-        {e === '.pdf' && src && (
-          <embed src={src} type="application/pdf" width="100%" height="80vh" />
-        )}
+        {/* PDF: PdfViewer を使用 */}
+        {e === '.pdf' && filePath && <PdfViewer filePath={filePath} />}
 
+        {/* video/audio */}
         {['.mp4', '.webm', '.ogg', '.mov', '.mkv'].includes(e) && src && (
           <video controls src={src} style={{ width: '100%', maxHeight: '80vh' }} />
         )}

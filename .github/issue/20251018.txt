@@ -57,7 +57,7 @@
 
 実装メモ
 - viewer ルートは簡易実装で良い（<img> / PDF.js 等は後で拡張）
-- openViewer は既に main 側で実装済み。Renderer のルーティングと連携させる
+- openViewer はすでに main 側で実装済み。Renderer のルーティングと連携させる
 ラベル: ui, viewer, phase1
 
 # [ci] CI の Windows ビルド確認（Windows runner）

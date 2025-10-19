@@ -1,312 +1,459 @@
-import { ipcMain, BrowserWindow, shell } from 'electron';
-import * as filesRepo from '../repositories/filesRepository';
-import * as savedRepo from '../repositories/savedSearchRepository';
-import * as tagsRepo from '../repositories/tagsRepository';
+import { ipcMain, app } from 'electron';
+import fs from 'fs';
+import path from 'path';
 import { initDb } from '../services/db';
+import { getCachedThumbnailPathFor, thumbnailGenerator } from '../services/thumbnail-generator';
+import crypto from 'crypto';
+
+/* --- 追加: シンプルな repo 実装（runtime 用） --- */
+const filesRepo = {
+  listFiles: (limit = 100, offset = 0) => {
+    const db = initDb();
+    return db
+      .prepare('SELECT * FROM files ORDER BY updated_at DESC LIMIT ? OFFSET ?')
+      .all(limit, offset);
+  },
+  getFileById: (id: string) => {
+    const db = initDb();
+    return db.prepare('SELECT * FROM files WHERE id = ?').get(id);
+  },
+  getFileByPath: (p: string) => {
+    const db = initDb();
+    return db.prepare('SELECT * FROM files WHERE path = ?').get(p);
+  },
+  upsertFile: (file: any) => {
+    const db = initDb();
+    const now = Math.floor(Date.now() / 1000);
+    const id =
+      file.id || (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'));
+    // try update first
+    const upd = db
+      .prepare(
+        `UPDATE files SET path = ?, name = ?, extension = ?, type = ?, size = ?, updated_at = ? WHERE id = ?`
+      )
+      .run(
+        file.path || null,
+        file.name || null,
+        file.extension || null,
+        file.type || null,
+        file.size || null,
+        now,
+        id
+      );
+    if (upd.changes === 0) {
+      db.prepare(
+        `INSERT INTO files (id, path, name, extension, type, size, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        file.path || null,
+        file.name || null,
+        file.extension || null,
+        file.type || null,
+        file.size || null,
+        now,
+        now
+      );
+    }
+    return db.prepare('SELECT * FROM files WHERE id = ?').get(id);
+  },
+  deleteFile: (id: string) => {
+    const db = initDb();
+    db.prepare('DELETE FROM files WHERE id = ?').run(id);
+  },
+};
+
+const savedRepo = {
+  listSavedSearches: () => {
+    const db = initDb();
+    if (
+      !db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='saved_searches'")
+        .get()
+    )
+      return [];
+    return db.prepare('SELECT * FROM saved_searches ORDER BY created_at DESC').all();
+  },
+  createSavedSearch: (payload: any) => {
+    const db = initDb();
+    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`INSERT INTO saved_searches (id, name, query, created_at) VALUES (?, ?, ?, ?)`).run(
+      id,
+      payload.name || 'unnamed',
+      payload.query || '',
+      now
+    );
+    return db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(id);
+  },
+  updateSavedSearch: (id: string, patch: any) => {
+    const db = initDb();
+    db.prepare(
+      `UPDATE saved_searches SET name = COALESCE(?, name), query = COALESCE(?, query) WHERE id = ?`
+    ).run(patch.name, patch.query, id);
+    return db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(id);
+  },
+  deleteSavedSearch: (id: string) => {
+    const db = initDb();
+    db.prepare('DELETE FROM saved_searches WHERE id = ?').run(id);
+  },
+  incrementExecutionCount: (id: string) => {
+    const db = initDb();
+    db.prepare('UPDATE saved_searches SET exec_count = COALESCE(exec_count,0)+1 WHERE id = ?').run(
+      id
+    );
+    return db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(id);
+  },
+};
+
+const tagsRepo = {
+  listTags: () => {
+    const db = initDb();
+    return db.prepare('SELECT * FROM tags ORDER BY name').all();
+  },
+  createTag: (name: string, color?: string, description?: string) => {
+    const db = initDb();
+    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(
+      'INSERT INTO tags (id, name, color, description, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, name, color || null, description || null, now);
+    return db.prepare('SELECT * FROM tags WHERE id = ?').get(id);
+  },
+  deleteTag: (id: string) => {
+    const db = initDb();
+    db.prepare('DELETE FROM tags WHERE id = ?').run(id);
+  },
+  addTagToFile: (fileId: string, tagId: string) => {
+    const db = initDb();
+    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(
+      'INSERT OR IGNORE INTO file_tags (id, file_id, tag_id, created_at) VALUES (?, ?, ?, ?)'
+    ).run(id, fileId, tagId, now);
+  },
+  removeTagFromFile: (fileId: string, tagId: string) => {
+    const db = initDb();
+    db.prepare('DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?').run(fileId, tagId);
+  },
+  listTagsForFile: (fileId: string) => {
+    const db = initDb();
+    return db
+      .prepare(
+        'SELECT t.* FROM tags t INNER JOIN file_tags ft ON ft.tag_id = t.id WHERE ft.file_id = ?'
+      )
+      .all(fileId);
+  },
+};
+/* --- end repo impl --- */
 
 /**
  * データ層用の IPC ハンドラを登録する（冪等: 既存ハンドラを先に削除）
  */
-export function registerDataIpc() {
+function registerDataIpc() {
+  // idempotent: remove existing handlers before registering
   const channels = [
-    // files
+    'files:list',
+    'files:getById',
+    'files:getByPath',
+    'files:upsert',
+    'files:delete',
+    'saved:list',
+    'saved:create',
+    'saved:update',
+    'saved:delete',
+    'saved:incExec',
+    'tags:list',
+    'tags:create',
+    'tags:delete',
+    'tags:addToFile',
+    'tags:removeFromFile',
+    'tags:listForFile',
     'get-files',
-    'get-file-by-id',
-    'get-file-by-path',
-    'upsert-file',
-    'delete-file',
-    // saved searches
-    'get-saved-searches',
-    'create-saved-search',
-    'update-saved-search',
-    'delete-saved-search',
-    'increment-search-count',
-    // tags: CRUD / file-tag
     'get-tags',
-    'create-tag',
-    'delete-tag',
-    'add-tag-to-file',
-    'remove-tag-from-file',
-    'list-tags-for-file',
     'search-files',
   ];
-
-  // 既存ハンドラがあれば削除しておく（再登録を安全にする）
   for (const ch of channels) {
     try {
       ipcMain.removeHandler(ch);
-    } catch (e) {
-      // ignore
-    }
+    } catch {}
   }
 
-  // テスト用 ping/pong ハンドラ（冪等）
-  try {
-    ipcMain.removeHandler('ipc-test-ping');
-  } catch {}
-  ipcMain.handle('ipc-test-ping', async (_event, payload: any) => {
-    try {
-      // 全ウィンドウへ pong を送る
-      for (const w of BrowserWindow.getAllWindows()) {
-        try {
-          w.webContents.send('ipc-test-pong', payload);
-        } catch {}
-      }
-      return { ok: true, echo: payload };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  });
+  ipcMain.handle('files:list', (_ev, limit = 100, offset = 0) =>
+    filesRepo.listFiles(limit, offset)
+  );
+  ipcMain.handle('files:getById', (_ev, id: string) => filesRepo.getFileById(id));
+  ipcMain.handle('files:getByPath', (_ev, p: string) => filesRepo.getFileByPath(p));
+  ipcMain.handle('files:upsert', (_ev, file: any) => filesRepo.upsertFile(file));
+  ipcMain.handle('files:delete', (_ev, id: string) => filesRepo.deleteFile(id));
 
-  // files
-  ipcMain.handle('get-files', async (_event, opts?: { limit?: number; offset?: number }) => {
+  ipcMain.handle('saved:list', () => savedRepo.listSavedSearches());
+  ipcMain.handle('saved:create', (_ev, payload: any) => savedRepo.createSavedSearch(payload));
+  ipcMain.handle('saved:update', (_ev, id: string, patch: any) =>
+    savedRepo.updateSavedSearch(id, patch)
+  );
+  ipcMain.handle('saved:delete', (_ev, id: string) => savedRepo.deleteSavedSearch(id));
+  ipcMain.handle('saved:incExec', (_ev, id: string) => savedRepo.incrementExecutionCount(id));
+
+  ipcMain.handle('tags:list', () => tagsRepo.listTags());
+  ipcMain.handle('tags:create', (_ev, name: string, color?: string, description?: string) =>
+    tagsRepo.createTag(name, color, description)
+  );
+  ipcMain.handle('tags:delete', (_ev, id: string) => tagsRepo.deleteTag(id));
+  ipcMain.handle('tags:addToFile', (_ev, fileId: string, tagId: string) =>
+    tagsRepo.addTagToFile(fileId, tagId)
+  );
+  ipcMain.handle('tags:removeFromFile', (_ev, fileId: string, tagId: string) =>
+    tagsRepo.removeTagFromFile(fileId, tagId)
+  );
+
+  // 名前付きハンドラを確実に登録する関数（既存の registerDataIpc がある場合は統合してください）
+  try {
+    ipcMain.removeHandler('get-files');
+  } catch {}
+  ipcMain.handle('get-files', async (_evt, opts: any = {}) => {
     try {
-      const limit = opts?.limit ?? 100;
-      const offset = opts?.offset ?? 0;
-      return { ok: true, data: filesRepo.listFiles(limit, offset) };
+      const limit = Number(opts?.limit) || 100;
+      const offset = Number(opts?.offset) || 0;
+      const rows = filesRepo.listFiles(limit, offset);
+      return { ok: true, data: rows };
     } catch (err) {
       console.error('[ipc] get-files error', err);
       return { ok: false, error: String(err) };
     }
   });
 
-  ipcMain.handle('get-file-by-id', async (_event, id: string) => {
-    try {
-      return { ok: true, data: filesRepo.getFileById(id) ?? null };
-    } catch (err) {
-      console.error('[ipc] get-file-by-id error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('get-file-by-path', async (_event, pathStr: string) => {
-    try {
-      return { ok: true, data: filesRepo.getFileByPath(pathStr) ?? null };
-    } catch (err) {
-      console.error('[ipc] get-file-by-path error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('upsert-file', async (_event, file: any) => {
-    try {
-      const rec = filesRepo.upsertFile(file);
-      return { ok: true, data: rec };
-    } catch (err) {
-      console.error('[ipc] upsert-file error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('delete-file', async (_event, id: string) => {
-    try {
-      filesRepo.deleteFile(id);
-      return { ok: true };
-    } catch (err) {
-      console.error('[ipc] delete-file error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  // saved searches
-  ipcMain.handle('get-saved-searches', async () => {
-    try {
-      return { ok: true, data: savedRepo.listSavedSearches() };
-    } catch (err) {
-      console.error('[ipc] get-saved-searches error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('create-saved-search', async (_event, payload: any) => {
-    try {
-      const rec = savedRepo.createSavedSearch(payload);
-      return { ok: true, data: rec };
-    } catch (err) {
-      console.error('[ipc] create-saved-search error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('update-saved-search', async (_event, id: string, patch: any) => {
-    try {
-      const rec = savedRepo.updateSavedSearch(id, patch);
-      return { ok: true, data: rec };
-    } catch (err) {
-      console.error('[ipc] update-saved-search error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('delete-saved-search', async (_event, id: string) => {
-    try {
-      savedRepo.deleteSavedSearch(id);
-      return { ok: true };
-    } catch (err) {
-      console.error('[ipc] delete-saved-search error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  ipcMain.handle('increment-search-count', async (_event, id: string) => {
-    try {
-      const rec = savedRepo.incrementExecutionCount(id);
-      return { ok: true, data: rec };
-    } catch (err) {
-      console.error('[ipc] increment-search-count error', err);
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  // tags: CRUD / file-tag
   try {
     ipcMain.removeHandler('get-tags');
   } catch {}
   ipcMain.handle('get-tags', async () => {
     try {
-      return { ok: true, data: tagsRepo.listTags() };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  try {
-    ipcMain.removeHandler('create-tag');
-  } catch {}
-  ipcMain.handle(
-    'create-tag',
-    async (_evt, payload: { name: string; color?: string; description?: string }) => {
-      try {
-        const rec = tagsRepo.createTag(payload.name, payload.color, payload.description);
-        return { ok: true, data: rec };
-      } catch (err) {
-        return { ok: false, error: String(err) };
-      }
-    }
-  );
-
-  try {
-    ipcMain.removeHandler('delete-tag');
-  } catch {}
-  ipcMain.handle('delete-tag', async (_evt, id: string) => {
-    try {
-      tagsRepo.deleteTag(id);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  try {
-    ipcMain.removeHandler('add-tag-to-file');
-  } catch {}
-  ipcMain.handle('add-tag-to-file', async (_evt, fileId: string, tagId: string) => {
-    try {
-      tagsRepo.addTagToFile(fileId, tagId);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  try {
-    ipcMain.removeHandler('remove-tag-from-file');
-  } catch {}
-  ipcMain.handle('remove-tag-from-file', async (_evt, fileId: string, tagId: string) => {
-    try {
-      tagsRepo.removeTagFromFile(fileId, tagId);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
-  });
-
-  try {
-    ipcMain.removeHandler('list-tags-for-file');
-  } catch {}
-  ipcMain.handle('list-tags-for-file', async (_evt, fileId: string) => {
-    try {
-      const rows = tagsRepo.listTagsForFile(fileId);
+      const rows = tagsRepo.listTags();
       return { ok: true, data: rows };
     } catch (err) {
+      console.error('[ipc] get-tags error', err);
       return { ok: false, error: String(err) };
     }
   });
 
-  // search-files: simple FTS + tag filter
   try {
     ipcMain.removeHandler('search-files');
   } catch {}
-  ipcMain.handle(
-    'search-files',
-    async (
-      _evt,
-      payload: {
-        text?: string;
-        includeTagIds?: string[];
-        excludeTagIds?: string[];
-        limit?: number;
-        offset?: number;
-      } = {}
-    ) => {
-      try {
-        const db = initDb();
-        const text = payload.text ? String(payload.text).trim() : '';
-        const include = Array.isArray(payload.includeTagIds) ? payload.includeTagIds : [];
-        const exclude = Array.isArray(payload.excludeTagIds) ? payload.excludeTagIds : [];
-        const limit = Number(payload.limit) || 100;
-        const offset = Number(payload.offset) || 0;
-
-        let baseSql = `SELECT f.* FROM files f`;
-        const joins: string[] = [];
-        const wheres: string[] = [];
-        const params: any[] = [];
-
-        if (text) {
-          joins.push(`INNER JOIN files_fts ft ON ft.rowid = f.rowid OR ft.name = f.name`);
-          wheres.push(`files_fts MATCH ?`);
-          params.push(text + '*');
-        }
-
-        if (include.length > 0) {
-          joins.push(
-            `INNER JOIN file_tags fit_in ON fit_in.file_id = f.id AND fit_in.tag_id IN (${include.map(() => '?').join(',')})`
-          );
-          params.push(...include);
-        }
-
-        if (exclude.length > 0) {
-          wheres.push(
-            `f.id NOT IN (SELECT file_id FROM file_tags WHERE tag_id IN (${exclude.map(() => '?').join(',')}))`
-          );
-          params.push(...exclude);
-        }
-
-        const sql = `${baseSql} ${joins.join(' ')} ${wheres.length ? 'WHERE ' + wheres.join(' AND ') : ''} ORDER BY f.updated_at DESC LIMIT ? OFFSET ?`;
-        params.push(limit, offset);
-        const rows = db.prepare(sql).all(...params);
-        return { ok: true, data: rows };
-      } catch (err) {
-        return { ok: false, error: String(err) };
-      }
-    }
-  );
-
-  // ファイルを既定アプリで開く（冪等登録）
-  try {
-    ipcMain.removeHandler('open-file-default');
-  } catch {}
-  ipcMain.handle('open-file-default', async (_evt, filePath: string) => {
+  ipcMain.handle('search-files', async (_evt, payload: any = {}) => {
     try {
-      if (!filePath) return { ok: false, error: 'no path' };
-      const res = await shell.openPath(String(filePath));
-      // shell.openPath returns empty string on success
-      if (typeof res === 'string' && res.length > 0) {
-        return { ok: false, error: res };
+      const text = String(payload?.text || '').trim();
+      const limit = Number(payload?.limit) || 50;
+      const db = initDb();
+      if (!text) {
+        const rows = filesRepo.listFiles(limit, 0);
+        return { ok: true, data: rows };
       }
-      return { ok: true };
+      // simple FTS query (escape handled by prepared statement)
+      const rows = db
+        .prepare(
+          `SELECT f.* FROM files f JOIN files_fts ft ON ft.rowid = f.rowid WHERE files_fts MATCH ? LIMIT ?`
+        )
+        .all(text, limit);
+      return { ok: true, data: rows };
     } catch (err) {
+      console.error('[ipc] search-files error', err);
       return { ok: false, error: String(err) };
     }
   });
+
+  // run-sql: 任意の SQL を実行（開発用）
+  try {
+    ipcMain.removeHandler('run-sql');
+  } catch {}
+  ipcMain.handle('run-sql', async (_evt, sql: string) => {
+    try {
+      if (!sql || typeof sql !== 'string') return { ok: false, error: 'invalid sql' };
+      const db = initDb();
+      const s = sql.trim();
+      // SELECT 判定
+      if (/^\s*select/i.test(s)) {
+        const rows = db.prepare(s).all();
+        return { ok: true, data: rows };
+      } else {
+        const info = db.prepare(s).run();
+        return { ok: true, info };
+      }
+    } catch (err) {
+      console.error('[ipc] run-sql error', err);
+      return { ok: false, error: String(err) };
+    }
+  });
+
+  // scan-folder: 指定フォルダを再帰スキャンして files テーブルへ登録（簡易）
+  try {
+    ipcMain.removeHandler('scan-folder');
+  } catch {}
+  ipcMain.handle('scan-folder', async (_evt, folder: string, opts: any = {}) => {
+    try {
+      if (!folder || typeof folder !== 'string') return { ok: false, error: 'invalid folder' };
+      const root = path.resolve(folder);
+      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory())
+        return { ok: false, error: 'not a directory' };
+
+      const allowedExts = Array.isArray(opts.exts)
+        ? opts.exts.map((e: string) => e.toLowerCase())
+        : null;
+      const db = initDb();
+      const insertStmt = db.prepare(
+        `INSERT OR REPLACE INTO files (id, path, name, extension, type, size, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM files WHERE path = ?), ?), ?)`
+      );
+
+      const results: { inserted: number; skipped: number; total: number } = {
+        inserted: 0,
+        skipped: 0,
+        total: 0,
+      };
+
+      const walk = (p: string) => {
+        for (const name of fs.readdirSync(p)) {
+          const full = path.join(p, name);
+          try {
+            const st = fs.statSync(full);
+            if (st.isDirectory()) {
+              walk(full);
+              continue;
+            }
+            if (!st.isFile()) continue;
+            const ext = path.extname(name).toLowerCase();
+            if (allowedExts && !allowedExts.includes(ext)) {
+              results.skipped++;
+              continue;
+            }
+            results.total++;
+            const id = require('crypto').randomUUID
+              ? require('crypto').randomUUID()
+              : require('crypto').randomBytes(16).toString('hex');
+            const now = Math.floor(Date.now() / 1000);
+            insertStmt.run(id, full, name, ext, null, st.size, full, now, now);
+            results.inserted++;
+          } catch (e) {
+            // ignore individual file errors
+          }
+        }
+      };
+
+      walk(root);
+      return { ok: true, ...results };
+    } catch (err) {
+      console.error('[ipc] scan-folder error', err);
+      return { ok: false, error: String(err) };
+    }
+  });
+
+  // --- 互換ハンドラ（preload/renderer が期待している短縮名に対応） ---
+  try {
+    ipcMain.removeHandler('get-thumb-path');
+  } catch {}
+  ipcMain.handle('get-thumb-path', async (_evt, filePath: string) => {
+    try {
+      const p = await getCachedThumbnailPathFor(String(filePath));
+      if (!p) return { ok: false, error: 'not found' };
+      // return plain filesystem path (preload will convert to file:// once)
+      return { ok: true, path: p };
+    } catch (err) {
+      console.error('[ipc] get-thumb-path error', err);
+      return { ok: false, error: String(err) };
+    }
+  });
+
+  try {
+    ipcMain.removeHandler('get-thumb-data');
+  } catch {}
+  ipcMain.handle('get-thumb-data', async (_evt, filePath: string) => {
+    try {
+      const p = await getCachedThumbnailPathFor(String(filePath));
+      if (!p) return { ok: false, error: 'not found' };
+      const buf = fs.readFileSync(p);
+      const ext = path.extname(p).toLowerCase();
+      const mime =
+        ext === '.png'
+          ? 'image/png'
+          : ext === '.jpg' || ext === '.jpeg'
+            ? 'image/jpeg'
+            : 'application/octet-stream';
+      const dataUrl = `data:${mime};base64,${buf.toString('base64')}`;
+      return { ok: true, dataUrl };
+    } catch (err) {
+      console.error('[ipc] get-thumb-data error', err);
+      return { ok: false, error: String(err) };
+    }
+  });
+
+  // --- start-thumbnail-generation の実ロジックを切り出し ---
+  const startThumbnailGenerationImpl = async (opts: any = {}) => {
+    try {
+      let list: string[] = [];
+      if (Array.isArray(opts?.paths) && opts.paths.length) {
+        list = opts.paths.map(String);
+      } else if (typeof opts?.folder === 'string' && opts.folder) {
+        const root = path.resolve(String(opts.folder));
+        if (fs.existsSync(root) && fs.statSync(root).isDirectory()) {
+          const walk: string[] = [];
+          const scan = (p: string) => {
+            for (const name of fs.readdirSync(p)) {
+              const full = path.join(p, name);
+              try {
+                const st = fs.statSync(full);
+                if (st.isDirectory()) {
+                  scan(full);
+                  continue;
+                }
+                if (!st.isFile()) continue;
+                walk.push(full);
+              } catch {}
+            }
+          };
+          scan(root);
+          list = walk;
+        }
+      }
+
+      if (list.length === 0) {
+        const rows = filesRepo.listFiles(Number(opts?.limit) || 500, 0);
+        list = rows.map((r: any) => r.path).filter(Boolean);
+      }
+
+      // 非同期で生成を開始
+      thumbnailGenerator.generateThumbnails(list).catch(err => {
+        console.error('[thumbnail] generation failed', err);
+      });
+
+      return { ok: true, started: true, count: list.length };
+    } catch (err) {
+      console.error('[ipc] start-thumbnail-generation error', err);
+      return { ok: false, error: String(err) };
+    }
+  };
+
+  // --- ハンドラ登録: 元の start-thumbnail-generation は impl を呼ぶ ---
+  try {
+    ipcMain.removeHandler('start-thumbnail-generation');
+  } catch {}
+  ipcMain.handle('start-thumbnail-generation', async (_evt, opts: any = {}) =>
+    startThumbnailGenerationImpl(opts)
+  );
+
+  // --- エイリアスは ipcMain.invoke を使わず impl を直接呼ぶ ---
+  try {
+    ipcMain.removeHandler('generate-thumbnails');
+  } catch {}
+  ipcMain.handle('generate-thumbnails', async (_evt, opts: any) =>
+    startThumbnailGenerationImpl(opts)
+  );
+
+  try {
+    ipcMain.removeHandler('create-thumbnails');
+  } catch {}
+  ipcMain.handle('create-thumbnails', async (_evt, opts: any) =>
+    startThumbnailGenerationImpl(opts)
+  );
 }
+
+// デフォルトエクスポートも出す
+export { registerDataIpc };
+export default registerDataIpc;

@@ -2,7 +2,8 @@ import { app, BrowserWindow, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { registerThumbnailIpc } from './ipc/thumbnail-ipc';
-import { registerDataIpc } from './ipc/data-ipc';
+const _dataIpc: any = require('./ipc/data-ipc');
+const registerDataIpc: any = _dataIpc.registerDataIpc ?? _dataIpc.default ?? undefined;
 import { registerViewerIpc } from './ipc/viewer-ipc';
 import { runAllMigrations } from './services/db';
 import os from 'os';
@@ -89,13 +90,16 @@ app.on('ready', async () => {
     } catch (migErr) {
       console.error('Failed to apply DB migrations:', migErr);
     }
-
     try {
       registerThumbnailIpc();
       console.info('registerThumbnailIpc: OK');
       // data IPC 登録
-      registerDataIpc();
-      console.info('registerDataIpc: OK');
+      if (typeof registerDataIpc === 'function') {
+        registerDataIpc();
+        console.info('registerDataIpc: OK');
+      } else {
+        console.warn('registerDataIpc is not exported from ./ipc/data-ipc; skipping registration');
+      }
       // viewer IPC 登録
       registerViewerIpc();
       console.info('registerViewerIpc: OK');
