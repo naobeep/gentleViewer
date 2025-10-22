@@ -2,6 +2,7 @@ import { app, BrowserWindow, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { registerThumbnailIpc } from './ipc/thumbnail-ipc';
+import { registerIpcHandlers } from './ipcHandlers';
 const _dataIpc: any = require('./ipc/data-ipc');
 const registerDataIpc: any = _dataIpc.registerDataIpc ?? _dataIpc.default ?? undefined;
 import { registerViewerIpc } from './ipc/viewer-ipc';
@@ -82,6 +83,14 @@ async function createWindow() {
 
 app.on('ready', async () => {
   try {
+    // 先に汎用 IPC ハンドラを登録（ping / reindex-ft 等）
+    try {
+      registerIpcHandlers();
+      console.info('registerIpcHandlers: OK (index.ts)');
+    } catch (e) {
+      console.error('registerIpcHandlers failed (index.ts):', e);
+    }
+
     // マイグレーション実行（migrations フォルダ内の未適用 SQL を順次実行）
     try {
       const migrationsDir = path.join(__dirname, '../migrations');

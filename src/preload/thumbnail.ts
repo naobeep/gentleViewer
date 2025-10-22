@@ -21,109 +21,87 @@ const safeOn = (channel: string, cb: (data: any) => void) => {
   };
 };
 
-// 最小限の安全な API（デバッグ用）
+// ここで invoke を明示的に追加し、すべての API が値を return するようにする
 const expose = {
+  // 汎用 invoke（必須）
+  invoke: (channel: string, ...args: any[]) => {
+    return safeInvoke(channel, ...args);
+  },
+
+  // 追加: Renderer が期待している startThumbnailGeneration のラッパー
+  // チャンネル名の違いに備えて複数の候補を試す（フォールバック）
+  startThumbnailGeneration: async (opts?: any) => {
+    const channels = [
+      'start-thumbnail-generation',
+      'startThumbnailGeneration',
+      'generate-thumbnails',
+    ];
+    for (const ch of channels) {
+      try {
+        const res = await safeInvoke(ch, opts);
+        // 成功したら結果を返す（undefined でも呼び出し自体は成功）
+        return res;
+      } catch (e) {
+        // 次のチャンネルを試す
+      }
+    }
+    throw new Error('startThumbnailGeneration: no ipc channel handled the request');
+  },
+
   // data / repo
-  getTags: async () => await safeInvoke('get-tags'),
-  getFiles: async (opts?: any) => await safeInvoke('get-files', opts),
-  reindexFTS: async () => await safeInvoke('reindex-ft'),
+  getTags: async () => {
+    return await safeInvoke('get-tags');
+  },
+  getFiles: async (opts?: any) => {
+    return await safeInvoke('get-files', opts);
+  },
+  reindexFTS: async (opts?: any) => {
+    return await safeInvoke('reindex-ft', opts);
+  },
 
   // migration / debug
-  applyMigration: async (filePath: string) => await safeInvoke('apply-migration-file', filePath),
+  applyMigration: async (filePath: string) => {
+    return await safeInvoke('apply-migration-file', filePath);
+  },
   runSql: async (sql: string) => {
-    const res = await safeInvoke('run-sql', sql);
-    return res;
+    return await safeInvoke('run-sql', sql);
   },
 
   // viewer / shell
-  openFileExternally: async (filePath: string) =>
-    await safeInvoke('open-file-externally', filePath),
-
-  // ビューアを開く（'open-viewer' ハンドラがあれば使い、なければ 'open-file-externally' を試す）
+  openFileExternally: async (filePath: string) => {
+    return await safeInvoke('open-file-externally', filePath);
+  },
   openViewer: async (filePath: string) => {
     try {
       return await safeInvoke('open-viewer', filePath);
     } catch (err) {
-      // フォールバック
-      try {
-        return await safeInvoke('open-file-externally', filePath);
-      } catch (err2) {
-        const message = err2 && (err2 as any).message ? (err2 as any).message : String(err);
-        throw new Error(message || 'openViewer failed');
-      }
+      return await safeInvoke('open-file-externally', filePath);
     }
   },
 
   // thumbnail events / progress (subscribe helpers)
   onThumbnailProgress: (cb: (data: any) => void) => safeOn('thumbnail-progress', cb),
   onThumbnailError: (cb: (data: any) => void) => safeOn('thumbnail-error', cb),
-
-  // generic on/off
   on: (channel: string, cb: (data: any) => void) => safeOn(channel, cb),
 
   // simple ping for health check
   ping: async () => {
-    try {
-      return await safeInvoke('ping');
-    } catch (e) {
-      return { ok: false, error: String(e) };
-    }
+    return await safeInvoke('ping');
   },
 
-  // フォルダスキャン（再帰）: window.electronAPI.scanFolder(path, { exts: [...] })
-  scanFolder: async (dirPath: string, opts?: { exts?: string[] }) => {
-    const res = await ipcRenderer.invoke('scan-folder', dirPath, opts || {});
+  // scan / files
+  scanFolder: async (dirPath: string, opts?: any) => {
+    const res = await safeInvoke('scan-folder', dirPath, opts || {});
     if (!res?.ok) throw new Error(res?.error ?? 'scan-folder failed');
     return res;
   },
-
-  // ファイル配列を一括登録: window.electronAPI.scanFiles([path1, path2])
   scanFiles: async (paths: string[]) => {
-    const res = await ipcRenderer.invoke('scan-files', paths);
+    const res = await safeInvoke('scan-files', paths);
     if (!res?.ok) throw new Error(res?.error ?? 'scan-files failed');
     return res;
   },
 
-  // 検索 API を公開（main の 'search-files' ハンドラを呼ぶ）
-  searchFiles: async (
-    payload: {
-      text?: string;
-      includeTagIds?: string[];
-      excludeTagIds?: string[];
-      limit?: number;
-      offset?: number;
-    } = {}
-  ) => {
-    const res = await safeInvoke('search-files', payload);
-    if (!res?.ok) throw new Error(res?.error ?? 'search-files failed');
-    return res.data;
-  },
-
-  // サムネイル生成を開始（folder または paths を指定）
-  startThumbnailGeneration: async (opts?: {
-    folder?: string;
-    paths?: string[];
-    exts?: string[];
-    limit?: number;
-  }) => {
-    const res = await safeInvoke('start-thumbnail-generation', opts || {});
-    if (!res?.ok) throw new Error(res?.error ?? 'start-thumbnail-generation failed');
-    return res;
-  },
-
-  generateThumbnails: async (opts?: any) => {
-    const res = await safeInvoke('start-thumbnail-generation', opts || {});
-    if (!res?.ok) throw new Error(res?.error ?? 'generate-thumbnails failed');
-    return res;
-  },
-
-  createThumbnails: async (opts?: any) => {
-    const res = await safeInvoke('start-thumbnail-generation', opts || {});
-    if (!res?.ok) throw new Error(res?.error ?? 'create-thumbnails failed');
-    return res;
-  },
-
-  // サムネイルの file:// URL を取得（main は生パスを返す想定）
+  // thumbnail path / data helpers (略：既存ロジックをそのまま残す)
   getThumbnailPath: async (filePath: string) => {
     const res = await safeInvoke('get-thumb-path', filePath);
     if (res?.ok && res.path) {
@@ -204,11 +182,25 @@ const expose = {
   },
 };
 
+// exposeInMainWorld に失敗した場合は globalThis にマージするフォールバックを入れる
 try {
   contextBridge.exposeInMainWorld('electronAPI', expose);
-} catch (e) {
-  // expose に失敗してもプロセスを止めない。Renderer 側で検出できるようログを出す。
   // eslint-disable-next-line no-console
-  console.error('preload: exposeInMainWorld failed', e);
+  console.log('[preload-src] electronAPI exposed (src/preload/thumbnail.ts)');
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.warn('[preload-src] exposeInMainWorld failed, merging to globalThis.electronAPI', e);
+  try {
+    const existing: any = (globalThis as any).electronAPI || {};
+    Object.assign(existing, expose);
+    (globalThis as any).electronAPI = existing;
+    // eslint-disable-next-line no-console
+    console.log(
+      '[preload-src] electronAPI merged to globalThis.electronAPI (src/preload/thumbnail.ts)'
+    );
+  } catch (e2) {
+    // eslint-disable-next-line no-console
+    console.error('[preload-src] failed to merge electronAPI to global', e2);
+  }
 }
 export {};

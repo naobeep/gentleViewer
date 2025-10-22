@@ -104,16 +104,29 @@ export default function App(): JSX.Element {
       .catch((e: any) => console.error('openViewer failed', e));
   };
 
-  const reindexFTS = async () => {
-    if (!confirm('FTS 再インデックスを実行しますか？（重い処理です）')) return;
+  async function reindexFTSHandler() {
+    const api = (window as any).electronAPI;
     try {
-      const res = await (window as any).electronAPI.reindexFTS();
-      alert('再インデックス完了: ' + (res.rowsAffected ?? 0) + ' 件');
-    } catch (e) {
-      console.error('reindexFTS failed', e);
-      alert('再インデックスに失敗しました: ' + String(e));
+      let result;
+      if (typeof api?.reindexFTS === 'function') {
+        // preload が個別 API を公開している場合
+        result = await api.reindexFTS();
+      } else if (typeof api?.invoke === 'function') {
+        // 汎用 invoke があればそれを使う
+        result = await api.invoke('reindex-ft');
+      } else if (typeof api?.reindexFT === 'function') {
+        // まれに別名が使われている場合の追加フォールバック
+        result = await api.reindexFT();
+      } else {
+        throw new Error('no reindex IPC available on electronAPI');
+      }
+      console.log('reindexFTS result', result);
+      return result;
+    } catch (err) {
+      console.error('reindexFTS failed', err);
+      throw err;
     }
-  };
+  }
 
   return (
     <div style={{ display: 'flex', height: '100vh', gap: 12 }}>
@@ -154,7 +167,7 @@ export default function App(): JSX.Element {
             <button onClick={loadFiles} style={{ marginRight: 8 }}>
               {loading ? '読み込み中...' : '再読み込み'}
             </button>
-            <button onClick={reindexFTS} style={{ marginRight: 8 }}>
+            <button onClick={reindexFTSHandler} style={{ marginRight: 8 }}>
               FTS再インデックス
             </button>
           </div>

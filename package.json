@@ -26,6 +26,7 @@
     "lint:fix": "eslint . --ext .ts,.tsx,.js,.jsx --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json,css,md}\"",
     "type-check": "tsc --noEmit",
+    "copy:migrations": "powershell -Command \"New-Item -ItemType Directory -Force -Path resources\\\\migrations; Copy-Item -Path src\\\\main\\\\migrations\\\\* -Destination resources\\\\migrations\\\\ -Recurse -Force\"",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
@@ -93,5 +94,25 @@
   "engines": {
     "node": ">=18.0.0",
     "npm": ">=9.0.0"
+  },
+  "config": {
+    "forge": {
+      "packagerConfig": {
+        "extraResource": [
+          "resources/migrations/"
+        ]
+      }
+    }
+  },
+  "build": {
+    "extraResources": [
+      {
+        "from": "resources/migrations/",
+        "to": "resources/migrations/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   }
 }
