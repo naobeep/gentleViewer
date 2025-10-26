@@ -7,6 +7,7 @@ import fs from 'fs';
 import * as nodeCrypto from 'crypto';
 import { listArchive, extractArchive } from './archive';
 import { pruneCache, getCacheInfo, loadPolicy, savePolicy } from './services/cache';
+import { startAutoPrune, stopAutoPrune, getCurrentPolicy } from './services/cacheAutoManager';
 
 const fsp = fs.promises;
 
@@ -165,8 +166,7 @@ export function registerIpcHandlers() {
 
     ipcMain.handle('cache.getPolicy', async () => {
       try {
-        const userData = app.getPath ? app.getPath('userData') : process.cwd();
-        const policy = loadPolicy(userData);
+        const policy = await loadPolicy(app.getPath('userData'));
         return { ok: true, policy };
       } catch (e) {
         return { ok: false, error: String(e) };
@@ -178,50 +178,132 @@ export function registerIpcHandlers() {
       async (_evt, policy: { maxSizeMB?: number; ttlDays?: number }) => {
         try {
           const userData = app.getPath ? app.getPath('userData') : process.cwd();
-          const cur = loadPolicy(userData);
-          const next = {
-            maxSizeBytes:
-              typeof policy.maxSizeMB === 'number'
-                ? Math.floor(policy.maxSizeMB * 1024 * 1024)
-                : cur.maxSizeBytes,
-            ttlSeconds:
-              typeof policy.ttlDays === 'number'
-                ? Math.floor(policy.ttlDays * 24 * 3600)
-                : cur.ttlSeconds,
-          };
-          const ok = savePolicy(userData, next);
-          return ok ? { ok: true, policy: next } : { ok: false, error: 'failed to save policy' };
+          // convert to the CachePolicy shape expected by savePolicy (maxSizeBytes, ttlSeconds)
+          const converted: any = {};
+          if (policy && typeof policy.maxSizeMB === 'number') {
+            converted.maxSizeBytes = Math.round(Number(policy.maxSizeMB) * 1024 * 1024);
+          }
+          if (policy && typeof policy.ttlDays === 'number') {
+            converted.ttlSeconds = Math.round(Number(policy.ttlDays) * 24 * 3600);
+          }
+          // preserve any other fields if present
+          Object.assign(converted, policy);
+          await savePolicy(userData, converted as any);
+          return { ok: true };
         } catch (e) {
           return { ok: false, error: String(e) };
         }
       }
     );
+
+    ipcMain.handle('cache.startAuto', async () => {
+      try {
+        const userData = app.getPath('userData');
+        const pol = await loadPolicy(userData);
+        startAutoPrune(userData, pol);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    });
+
+    ipcMain.handle('cache.stopAuto', async () => {
+      try {
+        stopAutoPrune();
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    });
   } catch (e) {
     console.error('[main] cache handlers registration failed', e);
   }
+
   // tags など既存ハンドラ
-  ipcMain.handle('tags.getAll', async () => {
+  try {
+    ipcMain.removeHandler('tag.getAll');
+  } catch {}
+  ipcMain.handle('tag.getAll', async () => {
     const store = await loadTagsStore();
-    return store.tags;
+    return { ok: true, tags: store.tags || [] };
   });
-  ipcMain.handle('tags.create', async (_evt, payload: { name: string; color?: string }) => {
+
+  try {
+    ipcMain.removeHandler('tag.getForFiles');
+  } catch {}
+  ipcMain.handle('tag.getForFiles', async (_evt, paths: string[] = []) => {
     const store = await loadTagsStore();
-    const id = nodeCrypto.randomBytes(8).toString('hex');
-    const t: Tag = { id, name: payload.name, color: payload.color };
-    store.tags.push(t);
-    await saveTagsStore(store);
-    return t;
+    const fileTags = store.fileTags || {};
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return { ok: true, tagIds: [] };
+    }
+    // intersection of tag arrays for provided paths (common tags)
+    const sets = paths.map(p => new Set((fileTags[p] || []).map(String)));
+    if (sets.length === 0) return { ok: true, tagIds: [] };
+    const intersection = [...sets[0]].filter(x => sets.every(s => s.has(x)));
+    return { ok: true, tagIds: intersection };
   });
-  ipcMain.handle('tags.getForFile', async (_evt, filePath: string) => {
+
+  try {
+    ipcMain.removeHandler('tag.create');
+  } catch {}
+  ipcMain.handle('tag.create', async (_evt, tag: { name: string; color?: string }) => {
     const store = await loadTagsStore();
-    return store.fileTags[filePath] || [];
+    const tags = store.tags || [];
+    const id =
+      nodeCrypto && typeof (nodeCrypto as any).randomUUID === 'function'
+        ? (nodeCrypto as any).randomUUID()
+        : `t-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const newTag = { id, name: String(tag?.name || '').trim(), color: tag?.color || '#cccccc' };
+    tags.push(newTag);
+    await saveTagsStore({ ...store, tags, fileTags: store.fileTags || {} });
+    return { ok: true, tag: newTag };
   });
-  ipcMain.handle('tags.setForFile', async (_evt, filePath: string, tagIds: string[]) => {
+
+  try {
+    ipcMain.removeHandler('tag.update');
+  } catch {}
+  ipcMain.handle('tag.update', async (_evt, id: string, patch: Partial<Tag>) => {
     const store = await loadTagsStore();
-    store.fileTags[filePath] = Array.isArray(tagIds) ? tagIds : [];
-    await saveTagsStore(store);
-    return true;
+    const tags = store.tags || [];
+    const idx = tags.findIndex(t => t.id === id);
+    if (idx === -1) return { ok: false, error: 'tag not found' };
+    tags[idx] = { ...tags[idx], ...patch };
+    await saveTagsStore({ ...store, tags, fileTags: store.fileTags || {} });
+    return { ok: true };
   });
+
+  try {
+    ipcMain.removeHandler('tag.delete');
+  } catch {}
+  ipcMain.handle('tag.delete', async (_evt, id: string) => {
+    const store = await loadTagsStore();
+    let tags = store.tags || [];
+    tags = tags.filter(t => t.id !== id);
+    const fileTags = store.fileTags || {};
+    for (const p of Object.keys(fileTags)) {
+      fileTags[p] = (fileTags[p] || []).filter((tid: string) => tid !== id);
+      if (fileTags[p].length === 0) delete fileTags[p];
+    }
+    await saveTagsStore({ tags, fileTags });
+    return { ok: true };
+  });
+
+  try {
+    ipcMain.removeHandler('tag.assignMultiple');
+  } catch {}
+  ipcMain.handle(
+    'tag.assignMultiple',
+    async (_evt, paths: string[] = [], tagIds: string[] = []) => {
+      const store = await loadTagsStore();
+      const fileTags = store.fileTags || {};
+      for (const p of paths) {
+        fileTags[p] = Array.isArray(tagIds) ? tagIds.map(String) : [];
+      }
+      await saveTagsStore({ tags: store.tags || [], fileTags });
+      return { ok: true };
+    }
+  );
 
   // ping (必須)
   try {
@@ -425,3 +507,12 @@ function clearCache(userData: string): any {
     }
   })();
 }
+
+// オプション: ipcHandlers の register 呼び出し時に自動開始（既存設定を読み取って）
+(async () => {
+  try {
+    const userData = app.getPath('userData');
+    const pol = await loadPolicy(userData);
+    if ((pol as any)?.enabled) startAutoPrune(userData, pol);
+  } catch {}
+})();

@@ -1,68 +1,49 @@
 import fs from 'fs';
 import path from 'path';
-import Database from 'better-sqlite3';
-import { app } from 'electron';
+import sqlite3 from 'sqlite3';
 
-/**
- * マイグレーションディレクトリの決定:
- * - packaged: process.resourcesPath + /resources/migrations
- * - development: app.getAppPath() + /src/main/migrations または /resources/migrations を探す
- */
-function resolveMigrationsDir(): string | null {
-  const candidates: string[] = [];
-  if (app.isPackaged) {
-    candidates.push(path.join(process.resourcesPath, 'resources', 'migrations'));
-  } else {
-    // 開発時はプロジェクト内のいくつかの候補を探す
-    const appPath = app.getAppPath();
-    candidates.push(path.join(appPath, 'resources', 'migrations'));
-    candidates.push(path.join(appPath, 'src', 'main', 'migrations'));
-    candidates.push(path.join(appPath, 'src', 'migrations'));
-  }
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
-  }
-  return null;
-}
+export async function applyMigrations(dbFile: string, migrationsDir: string) {
+  await fs.promises.mkdir(path.dirname(dbFile), { recursive: true });
+  const db = new sqlite3.Database(dbFile);
+  const run = (sql: string) =>
+    new Promise<void>((resolve, reject) => {
+      db.exec(sql, err => (err ? reject(err) : resolve()));
+    });
 
-export async function runMigrations(dbPath: string) {
-  const migrationsDir = resolveMigrationsDir();
-  if (!migrationsDir) {
-    console.warn('migrations dir not found (checked candidates). Skipping migrations.');
-    return;
-  }
+  const allMigs = (await fs.promises.readdir(migrationsDir))
+    .filter(f => f.match(/^\d+.*\.sql$/))
+    .sort();
 
-  const db = new Database(dbPath);
-  try {
-    db.exec('PRAGMA foreign_keys = ON;');
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
-    `);
+  // ensure schema_migrations exists so we can check
+  await run(
+    'CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);'
+  );
 
-    const appliedStmt = db.prepare('SELECT name FROM migrations');
-    const applied = new Set(appliedStmt.all().map((r: any) => r.name));
-
-    const files = fs
-      .readdirSync(migrationsDir)
-      .filter(f => f.endsWith('.sql'))
-      .sort();
-    for (const file of files) {
-      if (applied.has(file)) continue;
-      const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-      try {
-        db.exec('BEGIN');
-        db.exec(sql);
-        const insert = db.prepare('INSERT INTO migrations(name, applied_at) VALUES(?, ?)');
-        insert.run(file, new Date().toISOString());
-        db.exec('COMMIT');
-        console.log('migration applied:', file);
-      } catch (e) {
-        db.exec('ROLLBACK');
-        console.error('migration failed:', file, e);
-        throw e;
-      }
+  for (const m of allMigs) {
+    const version = m;
+    const checkSql = `SELECT 1 FROM schema_migrations WHERE version = '${version}' LIMIT 1;`;
+    const applied = await new Promise<boolean>((resolve, reject) => {
+      db.get(checkSql, (err, row) => {
+        if (err) return reject(err);
+        resolve(!!row);
+      });
+    });
+    if (applied) continue;
+    const sql = await fs.promises.readFile(path.join(migrationsDir, m), 'utf8');
+    await run('BEGIN;');
+    try {
+      await run(sql);
+      await run(
+        `INSERT INTO schema_migrations(version, applied_at) VALUES('${version}', strftime('%s','now'));`
+      );
+      await run('COMMIT;');
+      console.info(`[migrate] applied ${m}`);
+    } catch (e) {
+      await run('ROLLBACK;');
+      console.error(`[migrate] failed ${m}`, e);
+      throw e;
     }
-  } finally {
-    db.close();
   }
+
+  db.close();
 }

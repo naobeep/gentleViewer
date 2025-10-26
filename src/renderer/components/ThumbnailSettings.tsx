@@ -1,96 +1,172 @@
 import React, { useEffect, useState } from 'react';
 
+type ThumbnailConfig = {
+  concurrency?: number;
+  ttlSeconds?: number;
+  maxSizeBytes?: number;
+  [k: string]: any;
+};
+
 export default function ThumbnailSettings() {
-  const [concurrency, setConcurrency] = useState<number>(4);
-  const [status, setStatus] = useState<string | null>(null);
-  const [progress, setProgress] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [config, setConfig] = useState<ThumbnailConfig>({
+    concurrency: 2,
+    ttlSeconds: 2592000,
+    maxSizeBytes: 0,
+  });
+
+  const call = async (method: string, ...args: any[]) => {
+    const api = (window as any).electronAPI;
+    try {
+      // try namespaced API first, then fallback to generic invoke
+      if (api?.thumbnail && typeof api.thumbnail[method] === 'function') {
+        return await api.thumbnail[method](...args);
+      }
+      if (typeof api?.invoke === 'function') {
+        return await api.invoke(`thumbnail.${method}`, ...args);
+      }
+      // last resort: direct ipc via any helper
+      if (typeof api?.invoke === 'function') {
+        return await api.invoke(`thumbnail.${method}`, ...args);
+      }
+      throw new Error('no ipc api available');
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  };
 
   useEffect(() => {
+    let mounted = true;
     (async () => {
+      setLoading(true);
       try {
-        const res =
-          (await (window as any).electronAPI.getThumbnailConfig?.()) ??
-          (await (window as any).electronAPI.invoke?.('thumbnail.getConfig'));
-        if (res?.ok) setConcurrency(res.config.concurrency ?? 4);
+        const res = await call('getConfig');
+        if (mounted && res?.ok && res.config) {
+          setConfig(res.config);
+        }
       } catch (e) {
         console.error(e);
+      } finally {
+        if (mounted) setLoading(false);
       }
     })();
-
-    const api = (window as any).electronAPI;
-    const handler = (p: any) => {
-      setProgress(p);
-    };
-    // safe subscription: prefer onThumbnailProgress(cb) if exposed, else fallback to generic on(channel, cb)
-    if (typeof api?.onThumbnailProgress === 'function') {
-      api.onThumbnailProgress(handler);
-    } else if (typeof api?.on === 'function') {
-      api.on('thumbnail-progress', handler);
-    }
     return () => {
-      // noop: safeOn wrapper in preload may return unsubscribe; if available call it here.
+      mounted = false;
     };
   }, []);
 
+  const handleSave = async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await call('setConfig', config);
+      if (res?.ok) setMessage('Saved');
+      else setMessage('Save failed: ' + (res?.error ?? 'unknown'));
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleStartManaged = async () => {
+    setRunning(true);
+    setMessage(null);
+    try {
+      // paths empty => run for configured scope; pass concurrency in opts to enforce immediately
+      const res = await call('startManaged', [], { concurrency: Number(config.concurrency || 2) });
+      if (res?.ok) setMessage('Started thumbnail generation');
+      else setMessage('Start failed: ' + (res?.error ?? 'unknown'));
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
   return (
-    <div style={{ padding: 8, border: '1px solid #ddd', borderRadius: 6 }}>
-      <h4>サムネイル設定</h4>
-      <div style={{ marginBottom: 8 }}>
-        <label>並列度 (workers): </label>
-        <input
-          type="number"
-          value={concurrency}
-          min={1}
-          max={32}
-          onChange={e => setConcurrency(Number(e.target.value || 1))}
-          style={{ width: 80, marginLeft: 8 }}
-        />
-        <button
-          style={{ marginLeft: 8 }}
-          onClick={async () => {
-            try {
-              const res =
-                (await (window as any).electronAPI.setThumbnailConfig?.({ concurrency })) ??
-                (await (window as any).electronAPI.invoke?.('thumbnail.setConfig', {
-                  concurrency,
-                }));
-              if (res?.ok) setStatus('保存しました');
-              else setStatus('保存失敗');
-            } catch (e) {
-              setStatus(String(e));
+    <div style={{ padding: 12 }}>
+      <h3>Thumbnail Settings</h3>
+
+      <div>
+        <label>
+          Concurrency:
+          <input
+            type="number"
+            min={1}
+            value={Number(config.concurrency ?? 2)}
+            onChange={e =>
+              setConfig({ ...config, concurrency: Math.max(1, Number(e.target.value) || 1) })
             }
-          }}
-        >
-          保存
-        </button>
+            style={{ width: 80, marginLeft: 8 }}
+          />
+        </label>
       </div>
 
       <div style={{ marginTop: 8 }}>
+        <label>
+          TTL (days):
+          <input
+            type="number"
+            min={0}
+            value={Math.round((config.ttlSeconds ?? 0) / (60 * 60 * 24))}
+            onChange={e =>
+              setConfig({ ...config, ttlSeconds: Number(e.target.value) * 60 * 60 * 24 })
+            }
+            style={{ width: 80, marginLeft: 8 }}
+          />
+        </label>
+      </div>
+
+      <div style={{ marginTop: 8 }}>
+        <label>
+          Max cache (MB):
+          <input
+            type="number"
+            min={0}
+            value={Math.round((config.maxSizeBytes ?? 0) / 1024 / 1024)}
+            onChange={e =>
+              setConfig({ ...config, maxSizeBytes: Number(e.target.value) * 1024 * 1024 })
+            }
+            style={{ width: 120, marginLeft: 8 }}
+          />
+        </label>
+      </div>
+
+      <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+        <button onClick={handleSave} disabled={saving || loading}>
+          Save
+        </button>
+        <button onClick={handleStartManaged} disabled={running || loading}>
+          Start Managed Generation
+        </button>
         <button
           onClick={async () => {
-            setStatus('開始準備中...');
+            setLoading(true);
+            setMessage(null);
             try {
-              const api = (window as any).electronAPI;
-              const filesRes = await (api.getFiles?.() ?? api.invoke?.('getFiles'));
-              // support both { ok: true, files: [...] } and { ok: true, data: [...] }
-              const list = filesRes?.ok
-                ? (filesRes.files ?? filesRes.data ?? []).map((f: any) => f.path).filter(Boolean)
-                : [];
-              const r = await (api.startThumbnailManaged?.(list, { concurrency }) ??
-                api.invoke?.('thumbnail.startManaged', list, { concurrency }));
-              setStatus(r?.ok ? `開始: ${r.count} files` : `失敗: ${r?.error ?? 'unknown'}`);
+              const info = await call('getConfig');
+              setConfig(info.config || config);
+              setMessage('Refreshed');
             } catch (e) {
-              setStatus(String(e));
+              setMessage(String(e));
+            } finally {
+              setLoading(false);
             }
           }}
         >
-          並列生成を開始
+          Refresh
         </button>
       </div>
 
-      <div style={{ marginTop: 12 }}>
-        <div>進捗: {progress ? JSON.stringify(progress) : '—'}</div>
-        <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>{status}</div>
+      <div style={{ marginTop: 8, color: '#666' }}>
+        {loading && <div>Loading...</div>}
+        {saving && <div>Saving...</div>}
+        {running && <div>Starting...</div>}
+        {message && <div>{message}</div>}
       </div>
     </div>
   );

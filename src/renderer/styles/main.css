@@ -1,0 +1,236 @@
+:root {
+  --bg: #333333;
+  --bg-paper: #2b2b2b;
+  --primary-main: #ffd700; /* gold */
+  --divider: rgba(255, 255, 255, 0.06);
+  --text-primary: #f5f5f5;
+  --text-secondary: #cccccc;
+  --hover: rgba(255, 215, 0, 0.08);
+  --radius-sm: 6px;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 6px 18px rgba(0, 0, 0, 0.6);
+}
+
+.gv-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial;
+}
+
+.gv-header {
+  border-bottom: 1px solid var(--divider);
+  background: var(--bg-paper);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  box-shadow: var(--shadow-sm);
+  z-index: 30;
+}
+
+.header-inner {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 220px;
+}
+.app-logo {
+  width: 32px;
+  height: 32px;
+}
+.app-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--primary-main);
+}
+
+/* アイコン類をキーカラー（gold）に合わせる */
+.header-actions .icon-btn,
+.header-actions .window-btn,
+.search-icon,
+.search-clear {
+  color: var(--primary-main);
+}
+
+/* 小さなアクセント（ホバー時の背景は薄いゴールド）*/
+.icon-btn:hover,
+.window-btn:hover {
+  background: rgba(255, 215, 0, 0.06);
+}
+
+.header-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+.search-bar {
+  width: 400px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+  background: #fff;
+}
+.search-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 14px;
+}
+.search-clear {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: 8px;
+}
+.icon-btn,
+.window-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+.icon-btn:hover,
+.window-btn:hover {
+  background: var(--hover);
+}
+
+.gv-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+} /* min-height:0 for flex children overflow */
+
+.gv-sidebar {
+  border-right: 1px solid var(--divider);
+  background: var(--bg-paper);
+  padding: 12px;
+  overflow: auto;
+}
+
+.sidebar-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.quick-access {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qa-item {
+  height: 40px;
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.qa-item:hover {
+  background: var(--hover);
+}
+
+.tag-section {
+  background: transparent;
+  padding-top: 6px;
+}
+.tag-section-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.tag-search {
+  flex: 1;
+  height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+}
+.tag-add {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+}
+
+.tag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tag-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tag-item:hover {
+  background: var(--hover);
+}
+.tag-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.gv-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+} /* min-width:0 to allow children to shrink */
+.gv-toolbar {
+  border-bottom: 1px solid var(--divider);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: transparent;
+}
+.gv-main-area {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+.gv-statusbar {
+  border-top: 1px solid var(--divider);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--bg-paper);
+}

@@ -1,5 +1,6 @@
-import path from 'path';
 import { app, BrowserWindow } from 'electron';
+import path from 'path';
+import { applyMigrations } from './migrations';
 import { registerIpcHandlers } from './ipcHandlers';
 
 console.log('[main] starting main source');
@@ -79,3 +80,14 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+
+(async () => {
+  try {
+    const userData = app.getPath('userData');
+    const dbFile = path.join(userData, 'db.sqlite');
+    const migrationsDir = path.join(__dirname, 'db', 'migrations'); // ビルド後のパスに合わせて調整
+    await applyMigrations(dbFile, migrationsDir);
+  } catch (e) {
+    console.error('[main] migration error', e);
+  }
+})();

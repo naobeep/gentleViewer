@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import MainLayout from './layouts/MainLayout';
 import ThumbnailGrid from './components/ThumbnailGrid';
 import SearchBar from './components/SearchBar';
 import TagManager from './components/TagManager';
@@ -90,6 +91,27 @@ export default function App(): JSX.Element {
         if (Array.isArray(res.data)) arr = res.data;
         else if (res.ok && Array.isArray(res.result)) arr = res.result;
       }
+
+      // DEBUG: ファイルレコードの簡易ログ（サムネイル関連のフィールドをチェック）
+      console.debug('loadFiles: total=', arr.length);
+      for (let i = 0; i < Math.min(arr.length, 10); i++) {
+        const it = arr[i];
+        const thumbCandidates = [
+          it.thumbnail,
+          it.thumb,
+          it.thumbPath,
+          it.thumbnailPath,
+          it.preview,
+        ];
+        console.debug('file[', i, ']:', {
+          id: it.id,
+          path: it.path,
+          name: it.name,
+          thumbPresent: thumbCandidates.some(Boolean),
+          thumbCandidates,
+        });
+      }
+
       setFiles(arr);
     } catch (e) {
       console.error('loadFiles', e);
@@ -106,112 +128,120 @@ export default function App(): JSX.Element {
     setSearchResults(recs);
   };
 
-  // simple hash routing: #viewer?path=...
-  const hash = typeof window !== 'undefined' ? window.location.hash : '';
-  if (hash && hash.startsWith('#viewer')) {
-    const params = new URLSearchParams(hash.replace('#viewer', ''));
-    const pathParam = params.get('?path') ?? params.get('path') ?? '';
-    if (pathParam) {
-      return <Viewer filePath={decodeURIComponent(pathParam)} />;
-    }
-  }
-
-  const filePaths =
-    searchResults && searchResults.length > 0
-      ? searchResults.map(f => f.path)
-      : files.map(f => f.path);
-
-  const openInViewer = (p: string) => {
-    (window as any).electronAPI
-      .openViewer(p)
-      .catch((e: any) => console.error('openViewer failed', e));
-  };
-
-  async function reindexFTSHandler() {
-    const api = (window as any).electronAPI;
-    try {
-      let result;
-      if (typeof api?.reindexFTS === 'function') {
-        // preload が個別 API を公開している場合
-        result = await api.reindexFTS();
-      } else if (typeof api?.invoke === 'function') {
-        // 汎用 invoke があればそれを使う
-        result = await api.invoke('reindex-ft');
-      } else if (typeof api?.reindexFT === 'function') {
-        // まれに別名が使われている場合の追加フォールバック
-        result = await api.reindexFT();
-      } else {
-        throw new Error('no reindex IPC available on electronAPI');
-      }
-      console.log('reindexFTS result', result);
-      return result;
-    } catch (err) {
-      console.error('reindexFTS failed', err);
-      throw err;
-    }
-  }
-
+  // FTS 再インデックス実行ハンドラ
   async function handleReindexClick() {
     try {
-      console.log('onClickReindex: start');
       setReindexing(true);
       setReindexStatus('Reindexing...');
+
       const api = (window as any).electronAPI;
-      const res = api?.reindexFTS
-        ? await api.reindexFTS({ force: true })
-        : await api.invoke?.('reindex-ft', { force: true });
-      console.log('reindexFTS result', res);
+      let res: any = null;
+
+      if (api?.reindexFTS && typeof api.reindexFTS === 'function') {
+        res = await api.reindexFTS({ force: true });
+      } else if (typeof api?.invoke === 'function') {
+        res = await api.invoke('reindex-ft', { force: true });
+      } else {
+        throw new Error('reindex API not available');
+      }
+
       if (res?.ok) {
         setReindexStatus('Reindex OK');
-        // 再インデックス成功時にファイル一覧を再読み込みして画面を更新
         try {
           await loadFiles();
         } catch (e) {
           console.error('loadFiles after reindex failed', e);
         }
       } else {
-        setReindexStatus(`Failed: ${res?.error}`);
+        setReindexStatus(`Failed: ${res?.error ?? 'unknown'}`);
       }
     } catch (err) {
-      console.error('onClickReindex error', err);
+      console.error('handleReindexClick error', err);
       setReindexStatus(`Error: ${String(err)}`);
     } finally {
       setReindexing(false);
     }
   }
 
-  function isArchiveFile(nameOrPath: string | undefined | null) {
+  // サムネイル生成を明示的に要求するヘルパー（IPC の実装名に応じてフォールバック）
+  async function ensureThumbnails() {
+    try {
+      const api = (window as any).electronAPI;
+      const paths =
+        searchResults && searchResults.length > 0
+          ? searchResults.map((f: any) => f.path)
+          : files.map(f => f.path);
+      console.info('ensureThumbnails: requesting for', paths.length, 'files');
+      let resp;
+      if (api?.generateThumbnails && typeof api.generateThumbnails === 'function') {
+        resp = await api.generateThumbnails(paths);
+      } else if (typeof api?.invoke === 'function') {
+        resp = await api.invoke('generate-thumbnails', { paths });
+      } else if (api?.generateThumbs && typeof api.generateThumbs === 'function') {
+        resp = await api.generateThumbs(paths);
+      } else {
+        throw new Error('generate thumbnails IPC not available');
+      }
+      console.info('ensureThumbnails result', resp);
+    } catch (err) {
+      console.error('ensureThumbnails failed', err);
+    }
+  }
+
+  // sidebar content previously inline
+  const sidebarContent = (
+    <div>
+      <ErrorBoundary fallback={<div>タグ表示中にエラーが発生しました</div>}>
+        <TagManager
+          onSelectTag={() => {
+            /* future: filter */
+          }}
+        />
+      </ErrorBoundary>
+      <hr />
+      <ErrorBoundary fallback={<div>ファイルリスト表示中にエラーが発生しました</div>}>
+        <FileList onOpen={openInViewer} />
+      </ErrorBoundary>
+    </div>
+  );
+
+  // toolbar right: reload / reindex buttons
+  const toolbarRight = (
+    <div>
+      <button onClick={loadFiles} style={{ marginRight: 8 }}>
+        {loading ? '読み込み中...' : '再読み込み'}
+      </button>
+      <button onClick={ensureThumbnails} style={{ marginRight: 8 }}>
+        サムネイル生成
+      </button>
+      <button
+        id="reindex-btn"
+        onClick={handleReindexClick}
+        disabled={reindexing}
+        aria-pressed={reindexing}
+      >
+        {reindexing ? 'Reindexing…' : 'FTS再インデックス'}
+      </button>
+    </div>
+  );
+
+  // ファイル一覧または検索結果から表示するパス配列を作成
+  const filePaths =
+    searchResults && searchResults.length > 0
+      ? searchResults.map(f => f.path)
+      : files.map(f => f.path);
+
+  // アーカイブ判定ユーティリティ
+  function isArchiveFile(nameOrPath?: string | null) {
     if (!nameOrPath) return false;
-    const ext = nameOrPath.split('.').pop()?.toLowerCase() ?? '';
+    const ext = (nameOrPath.split('.').pop() || '').toLowerCase();
     return ['zip', '7z', 'rar', '001'].includes(ext);
   }
 
-  return (
-    <div style={{ display: 'flex', height: '100vh', gap: 12 }}>
-      <aside
-        style={{
-          width: 280,
-          borderRight: '1px solid #eee',
-          padding: 12,
-          boxSizing: 'border-box',
-          overflow: 'auto',
-          minWidth: 200,
-        }}
-      >
-        <ErrorBoundary fallback={<div>タグ表示中にエラーが発生しました</div>}>
-          <TagManager
-            onSelectTag={() => {
-              /* future: filter */
-            }}
-          />
-        </ErrorBoundary>
-        <hr />
-        <ErrorBoundary fallback={<div>ファイルリスト表示中にエラーが発生しました</div>}>
-          <FileList onOpen={openInViewer} />
-        </ErrorBoundary>
-      </aside>
-
-      <div style={{ flex: 1, padding: 16, overflow: 'auto' }}>
+  // main children : center (files) + right panel
+  const mainChildren = (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16, height: '100%' }}>
+      <div style={{ overflow: 'auto' }}>
         <header
           style={{
             display: 'flex',
@@ -221,20 +251,7 @@ export default function App(): JSX.Element {
           }}
         >
           <h2 style={{ margin: 0 }}>Files</h2>
-          <div>
-            <button onClick={loadFiles} style={{ marginRight: 8 }}>
-              {loading ? '読み込み中...' : '再読み込み'}
-            </button>
-            <button
-              id="reindex-btn"
-              onClick={handleReindexClick}
-              disabled={reindexing}
-              aria-pressed={reindexing}
-              style={{ marginRight: 8 }}
-            >
-              {reindexing ? 'Reindexing…' : 'FTS再インデックス'}
-            </button>
-          </div>
+          {/* toolbar buttons are moved to MainLayout.toolbarRight */}
         </header>
 
         {reindexStatus && <div id="reindex-status">{reindexStatus}</div>}
@@ -246,21 +263,62 @@ export default function App(): JSX.Element {
         </main>
       </div>
 
-      <div>
-        {/* 既存のファイル一覧 UI の近くで選択中ファイルを渡す */}
+      <div style={{ overflow: 'auto' }}>
+        {/* 右側パネル：選択ファイルに応じたビューや設定系 */}
         {selectedFile && isArchiveFile(selectedFile.path) && (
           <div style={{ marginTop: 12 }}>
             <ArchiveViewer filePath={selectedFile.path} />
           </div>
         )}
+
         <div style={{ marginTop: 12 }}>
           <CacheManager />
         </div>
         <div style={{ marginTop: 12 }}>
           <ThumbnailSettings />
         </div>
-        {/* ...existing UI continues ... */}
       </div>
     </div>
   );
+
+  // hash routing short-circuit (viewer)
+  const hash = typeof window !== 'undefined' ? window.location.hash : '';
+  if (hash && hash.startsWith('#viewer')) {
+    const params = new URLSearchParams(hash.replace('#viewer', ''));
+    const pathParam = params.get('?path') ?? params.get('path') ?? '';
+    if (pathParam) {
+      return <Viewer filePath={decodeURIComponent(pathParam)} />;
+    }
+  }
+
+  return (
+    <MainLayout
+      sidebarChildren={sidebarContent}
+      toolbarRight={toolbarRight}
+      statusRight={<div>v1.0.0</div>}
+    >
+      {mainChildren}
+    </MainLayout>
+  );
+}
+function openInViewer(filePath: string): void {
+  try {
+    const api = (window as any).electronAPI;
+    if (api?.openViewer && typeof api.openViewer === 'function') {
+      // preload が便利 API を公開している場合
+      api.openViewer(filePath);
+      return;
+    }
+    if (typeof api?.invoke === 'function') {
+      // 汎用 invoke にフォールバック
+      api
+        .invoke('open-viewer', filePath)
+        .catch((e: any) => console.error('open-viewer invoke failed', e));
+      return;
+    }
+    // 最終手段: ハッシュで viewer に遷移
+    window.location.hash = `#viewer?path=${encodeURIComponent(filePath)}`;
+  } catch (e) {
+    console.error('openInViewer failed', e);
+  }
 }
