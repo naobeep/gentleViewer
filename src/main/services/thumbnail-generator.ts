@@ -267,4 +267,73 @@ export class ThumbnailGenerator extends EventEmitter {
   }
 }
 
+// 追加: 実サムネイル生成関数を自動検出して返すヘルパ
+function resolveRealThumbnailGenerator(): ((filePath: string) => Promise<any>) | null {
+  const candidates = [
+    // 開発環境の src 配下候補
+    path.join(process.cwd(), 'src', 'main', 'thumbnail'),
+    path.join(process.cwd(), 'src', 'main', 'thumb'),
+    // ビルド後の dist 配下候補
+    path.join(process.cwd(), 'dist', 'main', 'thumbnail'),
+    path.join(process.cwd(), 'dist', 'main', 'thumb'),
+    // 相対パス候補（このモジュールからの相対）
+    path.join(__dirname, 'thumbnail'),
+    path.join(__dirname, '..', 'thumbnail'),
+    path.join(__dirname, 'thumb'),
+    path.join(__dirname, '..', 'thumb'),
+  ];
+
+  for (const p of candidates) {
+    try {
+      // require が成功すればモジュールを検査
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require(p);
+      if (!mod) continue;
+      const fnCandidates = [
+        mod.generateThumbnail,
+        mod.default,
+        mod.generate,
+        mod.createThumbnail,
+        mod.startForFile,
+        mod.generateThumb,
+      ].filter(Boolean);
+      for (const fn of fnCandidates) {
+        if (typeof fn === 'function') {
+          // 正常に呼べる wrapper を返す
+          return async (filePath: string) => {
+            // 一部モジュールは同期関数かもしれないので Promise.resolve で包む
+            return Promise.resolve(fn.call(mod, filePath));
+          };
+        }
+      }
+    } catch {
+      // ignore - try next candidate
+    }
+  }
+  return null;
+}
+
+const realGen = resolveRealThumbnailGenerator();
+
+// 既存 generateThumb/worker 実装を変更して realGen を優先的に使う
+async function generateForOne(filePath: string) {
+  try {
+    if (realGen) {
+      // 実実装を呼ぶ
+      await realGen(filePath);
+      return { ok: true, file: filePath, used: 'real-generator' };
+    }
+
+    // fallback-dummy（既存の安全な noop 実装）
+    const cacheDir = path.join(app.getPath('userData'), 'cache');
+    const tmp = path.join(cacheDir, 'thumb-dummy-' + path.basename(filePath));
+    await fs.promises.mkdir(path.dirname(tmp), { recursive: true });
+    await fs.promises.writeFile(tmp, '');
+    return { ok: true, file: filePath, used: 'fallback-dummy' };
+  } catch (err) {
+    return { ok: false, file: filePath, error: String(err) };
+  }
+}
+
+// ※既存の並列処理や progress コールバックから generateForOne を呼ぶように置き換えてください。
 export const thumbnailGenerator = new ThumbnailGenerator(2);

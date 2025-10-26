@@ -4,6 +4,9 @@ import SearchBar from './components/SearchBar';
 import TagManager from './components/TagManager';
 import FileList from './components/FileList';
 import Viewer from './components/Viewer';
+import ArchiveViewer from './components/ArchiveViewer';
+import CacheManager from './components/CacheManager';
+import ThumbnailSettings from './components/ThumbnailSettings';
 
 type FileRec = { id: string; path: string; name: string };
 
@@ -32,11 +35,15 @@ export default function App(): JSX.Element {
   const [files, setFiles] = useState<FileRec[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchResults, setSearchResults] = useState<FileRec[] | null>(null);
+  const [reindexing, setReindexing] = useState(false);
+  const [reindexStatus, setReindexStatus] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<FileRec | null>(null);
 
   useEffect(() => {
     console.log('App mounted');
     loadFiles();
     let unsub: (() => void) | null = null;
+    let unsubReindex: (() => void) | null = null;
     try {
       const handler = (p: any) => {
         if (p?.status === 'completed') loadFiles();
@@ -46,12 +53,28 @@ export default function App(): JSX.Element {
       } else if ((window as any).electronAPI.on) {
         unsub = (window as any).electronAPI.on('thumbnail-progress', handler);
       }
+      const reindexHandler = (payload: any) => {
+        console.log('reindex-done received', payload);
+        // 再インデックス完了なら一覧更新
+        try {
+          loadFiles();
+        } catch (e) {
+          console.error('loadFiles after reindex-done failed', e);
+        }
+      };
+      const api = (window as any).electronAPI;
+      if (api?.onReindexDone) {
+        unsubReindex = api.onReindexDone(reindexHandler);
+      } else if (api?.on) {
+        unsubReindex = api.on('reindex-done', reindexHandler);
+      }
     } catch (err) {
       console.error('subscribe thumbnail progress failed', err);
     }
     return () => {
       try {
         if (typeof unsub === 'function') unsub();
+        if (typeof unsubReindex === 'function') unsubReindex();
       } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -128,6 +151,41 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function handleReindexClick() {
+    try {
+      console.log('onClickReindex: start');
+      setReindexing(true);
+      setReindexStatus('Reindexing...');
+      const api = (window as any).electronAPI;
+      const res = api?.reindexFTS
+        ? await api.reindexFTS({ force: true })
+        : await api.invoke?.('reindex-ft', { force: true });
+      console.log('reindexFTS result', res);
+      if (res?.ok) {
+        setReindexStatus('Reindex OK');
+        // 再インデックス成功時にファイル一覧を再読み込みして画面を更新
+        try {
+          await loadFiles();
+        } catch (e) {
+          console.error('loadFiles after reindex failed', e);
+        }
+      } else {
+        setReindexStatus(`Failed: ${res?.error}`);
+      }
+    } catch (err) {
+      console.error('onClickReindex error', err);
+      setReindexStatus(`Error: ${String(err)}`);
+    } finally {
+      setReindexing(false);
+    }
+  }
+
+  function isArchiveFile(nameOrPath: string | undefined | null) {
+    if (!nameOrPath) return false;
+    const ext = nameOrPath.split('.').pop()?.toLowerCase() ?? '';
+    return ['zip', '7z', 'rar', '001'].includes(ext);
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', gap: 12 }}>
       <aside
@@ -167,17 +225,41 @@ export default function App(): JSX.Element {
             <button onClick={loadFiles} style={{ marginRight: 8 }}>
               {loading ? '読み込み中...' : '再読み込み'}
             </button>
-            <button onClick={reindexFTSHandler} style={{ marginRight: 8 }}>
-              FTS再インデックス
+            <button
+              id="reindex-btn"
+              onClick={handleReindexClick}
+              disabled={reindexing}
+              aria-pressed={reindexing}
+              style={{ marginRight: 8 }}
+            >
+              {reindexing ? 'Reindexing…' : 'FTS再インデックス'}
             </button>
           </div>
         </header>
+
+        {reindexStatus && <div id="reindex-status">{reindexStatus}</div>}
 
         <SearchBar onResults={onSearchResults} />
 
         <main>
           <ThumbnailGrid filePaths={filePaths} colCount={4} thumbWidth={160} />
         </main>
+      </div>
+
+      <div>
+        {/* 既存のファイル一覧 UI の近くで選択中ファイルを渡す */}
+        {selectedFile && isArchiveFile(selectedFile.path) && (
+          <div style={{ marginTop: 12 }}>
+            <ArchiveViewer filePath={selectedFile.path} />
+          </div>
+        )}
+        <div style={{ marginTop: 12 }}>
+          <CacheManager />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <ThumbnailSettings />
+        </div>
+        {/* ...existing UI continues ... */}
       </div>
     </div>
   );

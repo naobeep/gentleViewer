@@ -83,6 +83,9 @@ const expose = {
   onThumbnailProgress: (cb: (data: any) => void) => safeOn('thumbnail-progress', cb),
   onThumbnailError: (cb: (data: any) => void) => safeOn('thumbnail-error', cb),
   on: (channel: string, cb: (data: any) => void) => safeOn(channel, cb),
+  // 追加: reindex 完了購読のヘルパ
+  onReindexDone: (cb: (data: any) => void) => safeOn('reindex-done', cb),
+  onCachePruneProgress: (cb: (p: any) => void) => safeOn('cache-prune-progress', cb),
 
   // simple ping for health check
   ping: async () => {
@@ -179,6 +182,37 @@ const expose = {
     const res = await safeInvoke('get-thumb-data', filePath);
     if (res?.ok) return res.dataUrl;
     return null;
+  },
+
+  // cache
+  getCacheInfo: async () => {
+    return await safeInvoke('cache.getInfo');
+  },
+  clearCache: async () => {
+    return await safeInvoke('cache.clear');
+  },
+  pruneCache: async (opts?: { force?: boolean }) => {
+    return await safeInvoke('cache.prune', opts);
+  },
+  getCachePolicy: async () => {
+    return await safeInvoke('cache.getPolicy');
+  },
+  setCachePolicy: async (policy: { maxSizeMB?: number; ttlDays?: number }) => {
+    return await safeInvoke('cache.setPolicy', policy);
+  },
+
+  // 追加: サムネイル設定関連の API
+  getThumbnailConfig: async () => await safeInvoke('thumbnail.getConfig'),
+  setThumbnailConfig: async (cfg: { concurrency?: number }) =>
+    await safeInvoke('thumbnail.setConfig', cfg),
+  startThumbnailManaged: async (files: string[], opts?: { concurrency?: number }) =>
+    await safeInvoke('thumbnail.startManaged', files, opts),
+
+  // 追加: PDF 関連の API
+  pdf: {
+    getData: async (filePath: string) => {
+      return await ipcRenderer.invoke('pdf.getData', filePath);
+    },
   },
 };
 
